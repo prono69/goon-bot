@@ -34,11 +34,12 @@ except ValueError:
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
-OWNER_ID = {
+OWNER_ID = [
     int(x)
     for x in os.getenv("OWNER_ID", "").split()
     if x.isdigit()
-}
+]
+
 DB_NAME = os.getenv("DB_NAME", "goon_bot")
 
 PICS = [
