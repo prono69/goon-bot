@@ -10,7 +10,7 @@ START_BTN = InlineKeyboardMarkup(
     [[InlineKeyboardButton("📢 Uᴘᴅᴀᴛᴇ Cʜᴀɴɴᴇʟ", url="https://t.me/Neko_Drive")]]
 )
 
-@Client.on_message(filters.command("start") & filters.private)
+@Client.on_message(filters.command("start"))
 async def start_cmd(client: Client, message: Message):
     user = message.from_user
     mention = user.mention if user else "there"
