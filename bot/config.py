@@ -66,5 +66,5 @@ START_TXT = """<b>🪶 Kᴏɴɪᴄʜɪᴡᴀ, {}! 🪶</b>
 <b>⚡ Fast, reliable, and always online.</b>
 
 """
-
+PORNHWADB_API_KEY = os.getenv("PORNHWADB_API_KEY", "pwdb")
 
