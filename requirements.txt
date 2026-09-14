@@ -1,0 +1,10 @@
+aiofiles
+wzgram
+pymongo>=4.17.0
+requests
+beautifulsoup4
+pytz
+aiohttp
+Pillow
+psutil
+python-dotenv

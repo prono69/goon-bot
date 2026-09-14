@@ -1,0 +1,10 @@
+services:
+  goon_bot:
+    build: .
+    container_name: goon_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Mounts your local directory into the container so you can see logs or session files
+      - .:/app
