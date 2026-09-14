@@ -1,5 +1,6 @@
 aiofiles
 kurigram
+tgcrypto
 pymongo>=4.17.0
 requests
 beautifulsoup4

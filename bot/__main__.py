@@ -15,7 +15,6 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
-logging.getLogger("pyrogram").setLevel(logging.DEBUG)
 
 logger = logging.getLogger("GoonBot")
 

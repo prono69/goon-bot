@@ -1,5 +1,6 @@
 import sys
 import os
+import time
 import asyncio
 import random
 from bot.config import PICS, START_TXT, OWNER_ID
@@ -40,3 +41,17 @@ async def restart_cmd(client: Client, message: Message):
     await msg.edit("♻️ **Restarting bot...**")
 
     os.execl(sys.executable, sys.executable, "-m", "bot")    
+    
+    
+
+@Client.on_message(filters.command("ping"))
+async def ping_cmd(client: Client, message: Message):
+    start = time.perf_counter()
+
+    msg = await message.reply_text("🏓 Pong!")
+
+    latency = (time.perf_counter() - start) * 1000
+
+    await msg.edit_text(
+        f"🏓 **Pong!** `{latency:.0f} ms`"
+    )    

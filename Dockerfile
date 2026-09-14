@@ -1,24 +1,36 @@
-FROM python:3.12-slim
+FROM python:3.12-slim AS builder
 
-WORKDIR /app
-
-# Prevent Python from writing .pyc files & enable real-time logs
+WORKDIR /build
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Install git and clean up apt cache to keep image small
+# Build dependencies for packages such as TgCrypto
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    gcc \
+    g++ \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+# Runtime stage — lightweight final image
+FROM python:3.12-slim
+
+WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    TZ=Asia/Kolkata
+
+# Git is required by the /restart command
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/*
 
+# Required because /restart runs git pull inside /app
 RUN git config --global --add safe.directory /app
-
-# Install requirements
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy bot code
+COPY --from=builder /install /usr/local
 COPY . .
-
-# Run bot
-CMD ["python3", "-m", "bot"]
+CMD ["python", "-m", "bot"]
