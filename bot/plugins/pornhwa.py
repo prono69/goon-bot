@@ -18,11 +18,9 @@ from pyrogram.types import (
 # ─────────────────────────────────────────────────────────────
 
 API_BASE = "https://pornhwadb.com/api/v1"
-
 API_HEADERS = {
     "X-API-Key": PORNHWADB_API_KEY
 }
-
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=15)
 
 MAX_RESULTS = 7
@@ -49,40 +47,40 @@ def clean_query(text: str) -> tuple[str, str]:
     Supported:
 
         /search title
-        /search title --pornhwa
-        /search title --character
-        /search title --all
+        /search title -pornhwa
+        /search title -char
+        /search title -all
     """
 
     text = text.strip()
 
     search_type = "pornhwa"
 
-    if re.search(r"\s--character(?:\s|$)", text, re.I):
+    if re.search(r"\s-char(?:\s|$)", text, re.I):
         search_type = "character"
 
         text = re.sub(
-            r"\s--character(?:\s|$)",
+            r"\s-char(?:\s|$)",
             " ",
             text,
             flags=re.I,
         )
 
-    elif re.search(r"\s--all(?:\s|$)", text, re.I):
+    elif re.search(r"\s-all(?:\s|$)", text, re.I):
         search_type = "all"
 
         text = re.sub(
-            r"\s--all(?:\s|$)",
+            r"\s-all(?:\s|$)",
             " ",
             text,
             flags=re.I,
         )
 
-    elif re.search(r"\s--pornhwa(?:\s|$)", text, re.I):
+    elif re.search(r"\s-pornhwa(?:\s|$)", text, re.I):
         search_type = "pornhwa"
 
         text = re.sub(
-            r"\s--pornhwa(?:\s|$)",
+            r"\s-pornhwa(?:\s|$)",
             " ",
             text,
             flags=re.I,
@@ -250,13 +248,13 @@ async def search_cmd(client: Client, message: Message):
             "🔎 <b>Usage:</b>\n\n"
             "<code>/search query</code>\n\n"
             "<b>Flags:</b>\n"
-            "• <code>--pornhwa</code> — Search pornhwa\n"
-            "• <code>--character</code> — Search characters\n"
-            "• <code>--all</code> — Search everything\n\n"
+            "• <code>-pornhwa</code> — Search pornhwa\n"
+            "• <code>-char</code> — Search characters\n"
+            "• <code>-all</code> — Search everything\n\n"
             "<b>Examples:</b>\n"
             "<code>/search solo leveling</code>\n"
-            "<code>/search john --character</code>\n"
-            "<code>/search hero --all</code>"
+            "<code>/search john -char</code>\n"
+            "<code>/search hero -all</code>"
         )
 
         return
@@ -376,18 +374,19 @@ def build_external_link_buttons(
             continue
 
         valid_links.append(
-            (site_name, url)
-        )
-
-    # Only show the first 3 valid external links.
-    for site_name, url in valid_links[:MAX_EXTERNAL_LINKS]:
-
-        buttons.append([
             InlineKeyboardButton(
                 f"🌐 {site_name}",
+                style="link",
                 url=url,
             )
-        ])
+        )
+
+        if len(valid_links) >= MAX_EXTERNAL_LINKS:
+            break
+
+    # Put 2 external-link buttons on each row
+    for i in range(0, len(valid_links), 2):
+        buttons.append(valid_links[i:i + 2])
 
     return buttons
 
@@ -508,9 +507,9 @@ async def pornhwa_details(
     lines = [
         f"📖 <b>{esc(title)}</b>",
         "",
-        f"📝 <b>Description:</b>\n{esc(description)}",
+        f"📝 <b>Description:</b>\n<i>{esc(description)}</i>",
         "",
-        f"📊 <b>Status:</b> {esc(status_text)}",
+        f"📊 <b>Status:</b> `{esc(status_text)}`",
     ]
 
     if orientation:
@@ -542,7 +541,7 @@ async def pornhwa_details(
 
         lines.append(
             f"📚 <b>Chapters:</b> "
-            f"{esc(chapter_text)}"
+            f"`{esc(chapter_text)}`"
         )
 
     # ────────────────────────────────────────────────────────
@@ -561,7 +560,7 @@ async def pornhwa_details(
 
         lines.append(
             f"📅 <b>Released:</b> "
-            f"{esc(release)}"
+            f"`{esc(release)}`"
         )
 
     if end_year:
@@ -576,7 +575,7 @@ async def pornhwa_details(
 
         lines.append(
             f"🏁 <b>Ended:</b> "
-            f"{esc(ended)}"
+            f"`{esc(ended)}`"
         )
 
     # ────────────────────────────────────────────────────────
@@ -587,21 +586,21 @@ async def pornhwa_details(
 
         lines.append(
             f"🎨 <b>Artists:</b> "
-            f"{esc(', '.join(map(str, artists)))}"
+            f"`{esc(', '.join(map(str, artists)))}`"
         )
 
     if authors:
 
         lines.append(
             f"✍️ <b>Authors:</b> "
-            f"{esc(', '.join(map(str, authors)))}"
+            f"`{esc(', '.join(map(str, authors)))}`"
         )
 
     if genres:
 
         lines.append(
             f"🏷️ <b>Genres:</b> "
-            f"{esc(', '.join(map(str, genres)))}"
+            f"`{esc(', '.join(map(str, genres)))}`"
         )
 
     # ────────────────────────────────────────────────────────
