@@ -2,13 +2,12 @@ import io
 import json
 import sys
 import asyncio
-import logging
 import textwrap
 import traceback
 from collections import deque
 from pyrogram import Client, filters
 from pyrogram.types import Message
-
+from bot import logger
 from bot.config import OWNER_ID  # Using set/list of owner IDs from config
 
 # Constants
@@ -111,11 +110,10 @@ async def eval_command(client: Client, message: Message):
             out_file.name = "eval_output.txt"
             await reply_to.reply_document(
                 document=out_file,
-                caption=f"<code>{cmd[:100]}...</code>",
-                quote=True,
+                caption=f"<code>{cmd[:100]}...</code>"
             )
     else:
-        await reply_to.reply_text(formatted_html, quote=True)
+        await reply_to.reply_text(formatted_html)
 
     await status_message.delete()
 
@@ -135,7 +133,7 @@ async def execution(_, message: Message):
     status_message = await message.reply_text("<code>Processing shell command...</code>")
 
     try:
-        logging.info(f"Shell execution by {message.from_user.id}: {cmd}")
+        logger.info(f"Shell execution by {message.from_user.id}: {cmd}")
 
         # Spawn asynchronous subprocess
         process = await asyncio.create_subprocess_shell(
@@ -180,16 +178,15 @@ async def execution(_, message: Message):
                 await reply_to.reply_document(
                     document=out_file,
                     caption=f"<code>{cmd[:100]}...</code>",
-                    disable_notification=True,
-                    quote=True,
+                    disable_notification=True
                 )
         else:
-            await reply_to.reply_text(formatted_html, quote=True)
+            await reply_to.reply_text(formatted_html)
 
         # Track history using deque
         command_history.append(cmd)
 
     except Exception as ex:
-        await reply_to.reply_text(f"❌ <b>Error:</b> <code>{ex}</code>", quote=True)
+        await reply_to.reply_text(f"❌ <b>Error:</b> <code>{ex}</code>")
     finally:
         await status_message.delete()

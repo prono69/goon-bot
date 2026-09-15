@@ -1,22 +1,14 @@
 import os
 import sys
 import asyncio
-import logging
 import signal
-
+from bot import setup_logger
 from bot.config import API_ID, API_HASH, BOT_TOKEN
 from bot.database.db import mongo
 from pyrogram import Client, idle
 
 # Logging
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-
-logger = logging.getLogger("GoonBot")
+logger = setup_logger()  # opens log.txt, attaches handlers — runs once, here only
 
 # Bot
 async def run_bot() -> None:
