@@ -1,10 +1,12 @@
 import asyncio
 import re
+import time
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List, Tuple
 
 import aiohttp
 from bot import logger
+from bot.utils.nhentai_dl import cleanup_dir_and_files, create_cbz_archive
 from bot.config import NHENTAI_API_KEY
 from pyrogram import Client, filters, enums
 from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -124,45 +126,31 @@ def _clear_expired_cache() -> None:
 
 
 def clean_gallery_title(title: str) -> str:
-    """
-    Clean gallery title for display by removing artist credits, tags, and metadata.
-    
-    Removes patterns like:
-    - [Artist Name (Circle/Group)]
-    - | English translations
-    - [Language]
-    - [Other metadata tags]
-    
-    Args:
-        title: Raw gallery title from API
-    
-    Returns:
-        Cleaned title string
-    
-    Examples:
-        Input: "[Ura Meshiya (Maccha Neji)] Okaa-san no Dekajiri ga Erosugite | Mom's huge ass is too sexy [English] [innyinny]"
-        Output: "Okaa-san no Dekajiri ga Erosugite | Mom's huge ass is too sexy"
-    """
+    """Clean nHentai gallery title for display by removing metadata, tags, and language markers."""
     if not title:
         return "Unknown"
-    
-    # Remove artist/circle credits at the start: [Artist Name (Circle)]
-    title = re.sub(r"^\s*\[.*?\s*\(.*?\)\]\s*", "", title, flags=re.DOTALL)
-    
-    # Remove language tags and common metadata tags at the end: [English] [innyinny] etc
-    # Keep pipe-separated info like "Title | Subtitle"
-    title = re.sub(r"\s*\[.*?\]\s*$", "", title)
-    
-    # Clean up any multiple trailing tags
-    while re.search(r"\s*\[.*?\]\s*$", title):
-        title = re.sub(r"\s*\[.*?\]\s*$", "", title)
-    
-    # Remove "| English", "| Japanese" translations that come after pipe
-    title = re.sub(r"\s*\|\s*(English|Japanese|Chinese|Korean|Russian|French|German|Spanish)\s*$", "", title, flags=re.IGNORECASE)
-    
-    # Clean up excessive whitespace
+
+    # 1. Strip leading bracketed tags: [Artist], [Circle (Artist)], (Event)
+    title = re.sub(
+        r"^(\s*(\[[^\]]*\]|\([^\)]*\)|\{[^\}]*\}))*\s*", "", title
+    )
+
+    # 2. Strip trailing bracketed tags: [English], [Digital], (C99), {Decensored}
+    title = re.sub(
+        r"(\s*(\[[^\]]*\]|\([^\)]*\)|\{[^\}]*\}))*\s*$", "", title
+    )
+
+    # 3. Strip trailing language translations after pipe (e.g. "| English")
+    title = re.sub(
+        r"\s*\|\s*(English|Japanese|Chinese|Korean|Russian|French|German|Spanish|Translated)\b.*$",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
+
+    # 4. Collapse extra whitespace
     title = re.sub(r"\s+", " ", title).strip()
-    
+
     return title if title else "Unknown"
 
 
@@ -317,7 +305,17 @@ def _build_gallery_caption(data: Dict[str, Any], gallery_id: str) -> str:
 def _build_gallery_keyboard(gallery_id: str) -> InlineKeyboardMarkup:
     """Build inline keyboard for gallery info."""
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🔗 Open Gallery", url=GALLERY_URL_TEMPLATE.format(gallery_id))]]
+        [
+            [
+                InlineKeyboardButton(
+                    "🔗 Open Gallery",
+                    url=GALLERY_URL_TEMPLATE.format(gallery_id),
+                ),
+                InlineKeyboardButton(
+                    "📥 Download CBZ", callback_data=f"nhdl_{gallery_id}"
+                ),
+            ]
+        ]
     )
 
 
@@ -565,3 +563,109 @@ async def nhentai_callback(client: Client, callback_query: CallbackQuery) -> Non
             )
         except:
             pass
+
+def make_progress_bar(current: int, total: int, length: int = 10) -> str:
+    """Generate a clean visual progress bar."""
+    filled = int(length * current / total)
+    bar = "█" * filled + "░" * (length - filled)
+    percent = int(100 * (current / total))
+    return f"[{bar}] {percent}%"
+
+
+@Client.on_callback_query(filters.regex(r"^nhdl_(\d+)$"))
+async def nhentai_download_callback(
+    client: Client, callback_query: CallbackQuery
+) -> None:
+    """Handle CBZ download request with strict FloodWait prevention."""
+    gallery_id = callback_query.data.split("_")[1]
+
+    await callback_query.answer("⏳ Starting download...", show_alert=False)
+    status_msg = await callback_query.message.reply_text(
+        "🚀 <b>Initializing download...</b>"
+    )
+
+    data, status_code = await fetch_gallery_data(gallery_id)
+    if status_code != 200 or not data:
+        return await status_msg.edit_text(
+            "❌ <b>Failed to fetch gallery details.</b>"
+        )
+
+    last_update_time = [0.0]  # Store timestamp for throttling edits
+
+    async def update_progress(current: int, total: int, phase: str):
+        now = time.time()
+        # Strictly throttle edits to every 5 seconds to prevent FloodWait
+        if (now - last_update_time[0]) >= 5.0 or current == total:
+            last_update_time[0] = now
+            bar = make_progress_bar(current, total)
+            try:
+                if phase == "downloading":
+                    await status_msg.edit_text(
+                        f"📥 <b>Downloading Pages...</b>\n\n"
+                        f"<code>{bar}</code>\n"
+                        f"<b>Progress:</b> <code>{current}/{total}</code> pages"
+                    )
+            except Exception:
+                pass
+
+    temp_dir = f"/tmp/nh_{gallery_id}"
+    cbz_path = None
+    thumb_path = None
+
+    try:
+        # 1. Download pages & package CBZ
+        cbz_path, thumb_path = await create_cbz_archive(
+            data, progress_callback=update_progress
+        )
+
+        if not cbz_path or not os.path.exists(cbz_path):
+            return await status_msg.edit_text(
+                "❌ <b>Failed to process pages or generate CBZ.</b>"
+            )
+
+        # 2. Update status to Uploading
+        await status_msg.edit_text("📤 <b>Uploading CBZ to Telegram...</b>")
+
+        # 3. Extract title, total pages, and tags for caption
+        title_obj = data.get("title", {})
+        raw_name = (
+            title_obj.get("pretty")
+            or title_obj.get("english")
+            or title_obj.get("japanese")
+            or f"Gallery {gallery_id}"
+        )
+        name = clean_gallery_title(raw_name)
+
+        total_pages = data.get("num_pages", len(data.get("pages", [])))
+
+        # Format tags as hashtags: #big_breasts #anal #milf
+        raw_tags = get_tag_names(data.get("tags", []), "tag")[:12]
+        formatted_tags = " ".join(
+            [f"#{t.lower().replace(' ', '_').replace('-', '_')}" for t in raw_tags]
+        )
+
+        caption = (
+            f"🎬 <b>{name}</b>\n\n"
+            f"📊 <b>Format:</b> CBZ ({total_pages} Pages)\n\n"
+            f"🔗 <b>Source:</b> nHentai #{gallery_id}\n\n"
+            f"🏷 {formatted_tags if formatted_tags else '#nHentai'}"
+        )
+
+        # 4. Send CBZ document with thumbnail & caption
+        await callback_query.message.reply_document(
+            document=cbz_path,
+            thumb=thumb_path if (thumb_path and os.path.exists(thumb_path)) else None,
+            file_name=f"[{gallery_id}] {name[:35]}.cbz",
+            caption=caption,
+        )
+
+        await status_msg.delete()
+
+    except Exception as e:
+        logger.error(f"Error in nhentai_download_callback: {e}")
+        await status_msg.edit_text(
+            "❌ <b>An unexpected error occurred during download/upload.</b>"
+        )
+    finally:
+        # Cleanup temp directory and generated CBZ archive
+        cleanup_dir_and_files(temp_dir, cbz_path)
