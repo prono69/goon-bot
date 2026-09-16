@@ -6,10 +6,11 @@ import zipfile
 from typing import Any, Callable, List, Optional, Tuple
 
 import aiohttp
+from PIL import Image
 from bot import logger
 
 HEADERS = {
-    "User-Agent": "NHentaiBot/1.0 (https://github.com/prono69)",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 }
 
 IMAGE_SERVERS = [
@@ -56,33 +57,43 @@ async def download_thumbnail(
     gallery_data: dict,
     temp_dir: str,
 ) -> Optional[str]:
-    """Download the cover/thumbnail image to use as Telegram document thumbnail."""
+    """Download cover image and convert to JPEG format for Telegram."""
     cover_obj = gallery_data.get("cover") or gallery_data.get("thumbnail")
     if not cover_obj or not cover_obj.get("path"):
         return None
 
     rel_path = cover_obj.get("path")
-    ext = rel_path.split(".")[-1] if "." in rel_path else "jpg"
-    thumb_path = os.path.join(temp_dir, f"thumb.{ext}")
+    raw_thumb_path = os.path.join(temp_dir, "raw_thumb")
+    final_thumb_path = os.path.join(temp_dir, "thumb.jpg")
 
     semaphore = asyncio.Semaphore(1)
     success = await download_file_with_fallback(
-        session, THUMB_SERVERS, rel_path, thumb_path, semaphore
+        session, THUMB_SERVERS, rel_path, raw_thumb_path, semaphore
     )
 
-    return thumb_path if success else None
+    if not success or not os.path.exists(raw_thumb_path):
+        return None
+
+    # Convert thumbnail to JPEG format (required by Telegram API)
+    try:
+        with Image.open(raw_thumb_path) as img:
+            img = img.convert("RGB")
+            img.save(final_thumb_path, "JPEG")
+        
+        if os.path.exists(raw_thumb_path):
+            os.remove(raw_thumb_path)
+            
+        return final_thumb_path
+    except Exception as e:
+        logger.error(f"Failed to process thumbnail for Telegram: {e}")
+        return None
 
 
 async def create_cbz_archive(
     gallery_data: dict,
     progress_callback: Optional[Callable[[int, int, str], Any]] = None,
 ) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Download gallery pages using CDN server fallbacks and build a CBZ file.
-
-    Returns:
-        Tuple of (cbz_file_path, thumbnail_file_path)
-    """
+    """Download gallery pages using CDN server fallbacks and build a CBZ file."""
     gallery_id = str(gallery_data.get("id"))
     pages = gallery_data.get("pages", [])
 
@@ -95,12 +106,12 @@ async def create_cbz_archive(
     cbz_path = f"/tmp/{gallery_id}.cbz"
 
     os.makedirs(temp_dir, exist_ok=True)
-    semaphore = asyncio.Semaphore(5)  # Limit concurrent downloads to 5
+    semaphore = asyncio.Semaphore(5)
 
     completed_count = 0
 
     async with aiohttp.ClientSession() as session:
-        # Fetch thumbnail concurrently
+        # Fetch and format thumbnail concurrently
         thumb_task = asyncio.create_task(
             download_thumbnail(session, gallery_data, temp_dir)
         )
@@ -115,7 +126,6 @@ async def create_cbz_archive(
             file_name = f"{idx:03d}.{ext}"
             save_path = os.path.join(temp_dir, file_name)
 
-            # Shuffle image servers for load balancing
             servers = IMAGE_SERVERS.copy()
             random.shuffle(servers)
 
@@ -138,7 +148,7 @@ async def create_cbz_archive(
         thumb_path = await thumb_task
 
     downloaded_files = [
-        f for f in sorted(os.listdir(temp_dir)) if not f.startswith("thumb.")
+        f for f in sorted(os.listdir(temp_dir)) if not f.startswith("thumb") and not f.startswith("raw_thumb")
     ]
 
     if not downloaded_files:
@@ -146,7 +156,6 @@ async def create_cbz_archive(
         shutil.rmtree(temp_dir, ignore_errors=True)
         return None, None
 
-    # Compress into CBZ
     try:
         with zipfile.ZipFile(cbz_path, "w", zipfile.ZIP_DEFLATED) as cbz:
             for file in downloaded_files:
