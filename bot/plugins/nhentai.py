@@ -6,7 +6,7 @@ from typing import Optional, Dict, Any, List, Tuple
 import aiohttp
 from bot import logger
 from bot.config import NHENTAI_API_KEY
-from pyrogram import Client, filters
+from pyrogram import Client, filters, enums
 from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 # Constants
@@ -18,7 +18,7 @@ GALLERY_URL_TEMPLATE = "https://nhentai.net/g/{}/"
 HEADERS = {
     "Accept": "application/json",
     "Authorization": f"Key {NHENTAI_API_KEY}",
-    "User-Agent": "NHentaiBot/1.0 (https://github.com/yourrepo)",
+    "User-Agent": "NHentaiBot/1.0 (https://github.com/prono69)",
 }
 
 # Configuration constants
@@ -121,6 +121,49 @@ def _clear_expired_cache() -> None:
     for key in expired_keys:
         del _gallery_cache[key]
         logger.debug(f"Cleared expired cache entry: {key}")
+
+
+def clean_gallery_title(title: str) -> str:
+    """
+    Clean gallery title for display by removing artist credits, tags, and metadata.
+    
+    Removes patterns like:
+    - [Artist Name (Circle/Group)]
+    - | English translations
+    - [Language]
+    - [Other metadata tags]
+    
+    Args:
+        title: Raw gallery title from API
+    
+    Returns:
+        Cleaned title string
+    
+    Examples:
+        Input: "[Ura Meshiya (Maccha Neji)] Okaa-san no Dekajiri ga Erosugite | Mom's huge ass is too sexy [English] [innyinny]"
+        Output: "Okaa-san no Dekajiri ga Erosugite | Mom's huge ass is too sexy"
+    """
+    if not title:
+        return "Unknown"
+    
+    # Remove artist/circle credits at the start: [Artist Name (Circle)]
+    title = re.sub(r"^\s*\[.*?\s*\(.*?\)\]\s*", "", title, flags=re.DOTALL)
+    
+    # Remove language tags and common metadata tags at the end: [English] [innyinny] etc
+    # Keep pipe-separated info like "Title | Subtitle"
+    title = re.sub(r"\s*\[.*?\]\s*$", "", title)
+    
+    # Clean up any multiple trailing tags
+    while re.search(r"\s*\[.*?\]\s*$", title):
+        title = re.sub(r"\s*\[.*?\]\s*$", "", title)
+    
+    # Remove "| English", "| Japanese" translations that come after pipe
+    title = re.sub(r"\s*\|\s*(English|Japanese|Chinese|Korean|Russian|French|German|Spanish)\s*$", "", title, flags=re.IGNORECASE)
+    
+    # Clean up excessive whitespace
+    title = re.sub(r"\s+", " ", title).strip()
+    
+    return title if title else "Unknown"
 
 
 # ============================================================================
@@ -349,7 +392,7 @@ async def send_search_results(
     query: str,
 ) -> bool:
     """
-    Send search results as inline buttons.
+    Send search results as inline buttons with cleaned titles.
     
     Args:
         status: Status message to edit
@@ -369,13 +412,16 @@ async def send_search_results(
 
     buttons = []
     for item in results[:SEARCH_RESULT_LIMIT]:
-        title = item.get("english_title") or f"Gallery {item.get('id')}"
-        # Truncate title for button display
-        btn_title = f"🔍 {(title[:32] + '...') if len(title) > 35 else title}"
+        raw_title = item.get("english_title") or f"Gallery {item.get('id')}"
+        # Clean the title by removing artist credits, tags, and metadata
+        cleaned_title = clean_gallery_title(raw_title)
+        
+        # Truncate cleaned title for button display (max 40 chars for better UX)
+        btn_title = f"🔍 {cleaned_title[:40] + '...' if len(cleaned_title) > 40 else cleaned_title}"
         item_id = item.get("id")
 
         buttons.append(
-            [InlineKeyboardButton(text=btn_title, callback_data=f"nhget_{item_id}")]
+            [InlineKeyboardButton(text=btn_title, callback_data=f"nhget_{item_id}", style=enums.ButtonStyle.PRIMARY)]
         )
 
     reply_markup = InlineKeyboardMarkup(buttons)

@@ -4,7 +4,7 @@ import html
 import re
 
 from bot.config import PORNHWADB_API_KEY
-from pyrogram import Client, filters
+from pyrogram import Client, filters, enums
 from pyrogram.types import (
     Message,
     CallbackQuery,
@@ -376,7 +376,7 @@ def build_external_link_buttons(
         valid_links.append(
             InlineKeyboardButton(
                 f"🌐 {site_name}",
-                style="link",
+                style=enums.ButtonStyle.PRIMARY,
                 url=url,
             )
         )

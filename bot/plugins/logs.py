@@ -2,7 +2,7 @@ from html import escape
 import io
 import os
 
-from pyrogram import Client, filters
+from pyrogram import Client, filters, enums
 from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from bot import logger
@@ -35,7 +35,7 @@ async def send_logs(client: Client, message: Message):
         return
 
     buttons = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("📄 Display Logs", style="success", callback_data="show_logs")]]
+        [[InlineKeyboardButton("📄 Display Logs", style=enums.ButtonStyle.SUCCESS, callback_data="show_logs")]]
     )
 
     with io.BytesIO(file_bytes) as out_file:

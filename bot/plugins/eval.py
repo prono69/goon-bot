@@ -25,7 +25,7 @@ async def aexec(code: str, client: Client, message: Message):
     m = e = event = neo = message
     r = reply = message.reply_to_message
     c = client
-    chat = message.chat.id
+    chat = message.chat
     to_photo = message.reply_photo
     to_video = message.reply_video
 
