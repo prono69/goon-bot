@@ -33,7 +33,6 @@ except ValueError:
 # ─────────────────────────────────────────────────────────────
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-
 OWNER_ID = [
     int(x)
     for x in os.getenv("OWNER_ID", "").split()
@@ -41,7 +40,6 @@ OWNER_ID = [
 ]
 
 DB_NAME = os.getenv("DB_NAME", "goon_bot")
-
 PICS = [
     'https://files.catbox.moe/726u1k.jpg',
     'https://files.catbox.moe/z2kfgd.jpg',
@@ -67,4 +65,5 @@ START_TXT = """<b>🪶 Kᴏɴɪᴄʜɪᴡᴀ, {}! 🪶</b>
 
 """
 PORNHWADB_API_KEY = os.getenv("PORNHWADB_API_KEY", "pwdb")
+NHENTAI_API_KEY = os.getenv("NHENTAI_API_KEY", "put_api_key_here")
 

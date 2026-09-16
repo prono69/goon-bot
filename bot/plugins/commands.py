@@ -33,14 +33,25 @@ async def restart_cmd(client: Client, message: Message):
         stderr=asyncio.subprocess.PIPE,
         cwd="/app",
     )
+
     stdout, stderr = await process.communicate()
     output = (stdout or stderr).decode().strip() or "No output"
 
-    await msg.edit(f"📦 **Git pull result:**\n`{output}`")
+    await msg.edit(
+        f"📦 **Git pull result:**\n`{output}`"
+    )
     await asyncio.sleep(1)
     await msg.edit("♻️ **Restarting bot...**")
 
-    os.execl(sys.executable, sys.executable, "-m", "bot")    
+    os.environ["RESTART_CHAT_ID"] = str(message.chat.id)
+    os.environ["RESTART_MSG_ID"] = str(msg.id)
+
+    os.execl(
+        sys.executable,
+        sys.executable,
+        "-m",
+        "bot"
+    )
     
     
 

@@ -2,15 +2,17 @@ import os
 import sys
 import asyncio
 import signal
+
 from bot import setup_logger
 from bot.config import API_ID, API_HASH, BOT_TOKEN
 from bot.database.db import mongo
 from pyrogram import Client, idle
 
-# Logging
-logger = setup_logger()  # opens log.txt, attaches handlers — runs once, here only
 
-# Bot
+# Logging
+logger = setup_logger()
+
+
 async def run_bot() -> None:
     """Start and keep the Telegram bot running."""
 
@@ -41,7 +43,6 @@ async def run_bot() -> None:
         try:
             loop.add_signal_handler(sig, shutdown_handler)
         except (NotImplementedError, RuntimeError):
-            # Some environments don't support custom signal handlers.
             pass
 
     try:
@@ -50,8 +51,33 @@ async def run_bot() -> None:
         logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
         await app.start()
-        await mongo.connect()
 
+        # -------------------------------------------------
+        # Edit restart message after bot has started
+        # -------------------------------------------------
+        restart_chat_id = os.getenv("RESTART_CHAT_ID")
+        restart_msg_id = os.getenv("RESTART_MSG_ID")
+
+        if restart_chat_id and restart_msg_id:
+            try:
+                await app.edit_message_text(
+                    chat_id=int(restart_chat_id),
+                    message_id=int(restart_msg_id),
+                    text="✅ **Bot restarted successfully!**",
+                )
+
+            except Exception:
+                logger.exception(
+                    "Failed to update restart success message."
+                )
+
+            finally:
+                os.environ.pop("RESTART_CHAT_ID", None)
+                os.environ.pop("RESTART_MSG_ID", None)
+
+        # -------------------------------------------------
+
+        await mongo.connect()
         me = await app.get_me()
 
         logger.info("Bot started successfully!")
@@ -86,6 +112,7 @@ def main() -> None:
         asyncio.run(run_bot())
     except KeyboardInterrupt:
         logger.info("Application terminated.")
+
 
 if __name__ == "__main__":
     main()

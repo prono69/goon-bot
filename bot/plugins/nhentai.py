@@ -1,269 +1,521 @@
+import asyncio
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
+from typing import Optional, Dict, Any, List, Tuple
 
 import aiohttp
+from bot import logger
+from bot.config import NHENTAI_API_KEY
 from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-
+# Constants
 API_URL = "https://nhentai.net/api/v2/galleries/{}"
+SEARCH_URL = "https://nhentai.net/api/v2/search"
+COVER_URL_TEMPLATE = "https://t1.nhentai.net/{}"
+GALLERY_URL_TEMPLATE = "https://nhentai.net/g/{}/"
+
+HEADERS = {
+    "Accept": "application/json",
+    "Authorization": f"Key {NHENTAI_API_KEY}",
+    "User-Agent": "NHentaiBot/1.0 (https://github.com/yourrepo)",
+}
+
+# Configuration constants
+SEARCH_RESULT_LIMIT = 6
+TAG_DISPLAY_LIMIT = 12
+API_TIMEOUT_SECONDS = 15
+CACHE_EXPIRY_SECONDS = 3600  # 1 hour
+
+# Response cache to avoid duplicate API calls
+_gallery_cache: Dict[str, Tuple[Dict[str, Any], datetime]] = {}
 
 
-def extract_gallery_id(text: str):
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
+
+def extract_gallery_id(text: str) -> Optional[str]:
     """
-    Extract gallery ID from:
-      /nh 644225
-      /nh https://nhentai.net/g/644225/
-      /nh https://nhentai.net/g/644225
+    Extract gallery ID from text or URL.
+    
+    Args:
+        text: Raw user input (ID, URL, or search query)
+    
+    Returns:
+        Gallery ID as string, or None if not found/invalid
     """
-
     text = text.strip()
-
+    
     # Direct numeric ID
     if text.isdigit():
-        return text
+        gallery_id = text
+        if len(gallery_id) > 0:  # Ensure it's not empty
+            return gallery_id
+        return None
 
-    # nhentai gallery URL
+    # URL pattern: nhentai.net/g/123456
     match = re.search(
         r"https?://(?:www\.)?nhentai\.net/g/(\d+)/?",
         text,
         re.IGNORECASE,
     )
-
+    
     if match:
         return match.group(1)
-
+    
     return None
 
 
-def format_upload_date(timestamp):
-    """Convert Unix timestamp to a readable date."""
-
+def format_upload_date(timestamp: int) -> str:
+    """
+    Format Unix timestamp to human-readable date.
+    
+    Args:
+        timestamp: Unix timestamp
+    
+    Returns:
+        Formatted date string or "Unknown" on error
+    """
     try:
         return datetime.fromtimestamp(timestamp).strftime("%d %B %Y")
-    except Exception:
+    except (ValueError, OSError, OverflowError):
+        logger.warning(f"Failed to format timestamp: {timestamp}")
         return "Unknown"
 
 
-def get_tag_names(tags, tag_type=None):
-    """Return tag names, optionally filtered by type."""
-
+def get_tag_names(tags: List[Dict[str, Any]], tag_type: Optional[str] = None) -> List[str]:
+    """
+    Extract tag names, optionally filtered by type.
+    
+    Args:
+        tags: List of tag dictionaries from API
+        tag_type: Optional filter (e.g., "artist", "group", "tag")
+    
+    Returns:
+        List of tag name strings
+    """
     if not tags:
         return []
-
+    
     result = []
-
     for tag in tags:
+        # If filtering by type, skip mismatches
         if tag_type and tag.get("type") != tag_type:
             continue
-
+        
         name = tag.get("name")
-
         if name:
             result.append(name)
-
+    
     return result
 
 
-@Client.on_message(filters.command("nh"))
-async def nhentai_info(client, message):
+def _clear_expired_cache() -> None:
+    """Remove expired entries from gallery cache."""
+    now = datetime.now()
+    expired_keys = [
+        key for key, (_, timestamp) in _gallery_cache.items()
+        if (now - timestamp).total_seconds() > CACHE_EXPIRY_SECONDS
+    ]
+    for key in expired_keys:
+        del _gallery_cache[key]
+        logger.debug(f"Cleared expired cache entry: {key}")
 
-    # /nh <id or URL>
-    if len(message.command) < 2:
-        await message.reply_text(
-            "<b>Usage:</b>\n\n"
-            "<code>/nh 644225</code>\n"
-            "<code>/nh https://nhentai.net/g/644225/</code>"
-        )
-        return
 
-    query = message.text.split(maxsplit=1)[1].strip()
+# ============================================================================
+# API FUNCTIONS
+# ============================================================================
 
-    gallery_id = extract_gallery_id(query)
+async def fetch_gallery_data(gallery_id: str) -> Tuple[Optional[Dict[str, Any]], int]:
+    """
+    Fetch gallery data from nhentai API with caching.
+    
+    Args:
+        gallery_id: nhentai gallery ID
+    
+    Returns:
+        Tuple of (data dict or None, HTTP status code)
+    """
+    # Check cache first
+    _clear_expired_cache()
+    if gallery_id in _gallery_cache:
+        data, _ = _gallery_cache[gallery_id]
+        logger.debug(f"Cache hit for gallery {gallery_id}")
+        return data, 200
 
-    if not gallery_id:
-        await message.reply_text(
-            "❌ <b>Invalid gallery ID or URL.</b>\n\n"
-            "Send an nhentai gallery ID or a gallery URL."
-        )
-        return
-
-    status = await message.reply_text(
-        "🔎 <i>Fetching gallery information...</i>"
-    )
+    url = API_URL.format(gallery_id)
+    timeout = aiohttp.ClientTimeout(total=API_TIMEOUT_SECONDS)
 
     try:
-        url = API_URL.format(gallery_id)
-
-        headers = {
-            "Accept": "application/json",
-            "User-Agent": "Mozilla/5.0",
-        }
-
-        timeout = aiohttp.ClientTimeout(total=15)
-
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url, headers=headers) as response:
+            async with session.get(url, headers=HEADERS) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    # Cache the result
+                    _gallery_cache[gallery_id] = (data, datetime.now())
+                    logger.info(f"Fetched gallery {gallery_id} from API")
+                    return data, 200
+                elif response.status == 404:
+                    logger.warning(f"Gallery {gallery_id} not found (404)")
+                    return None, 404
+                else:
+                    logger.error(f"API error for gallery {gallery_id}: {response.status}")
+                    return None, response.status
+                    
+    except asyncio.TimeoutError:
+        logger.error(f"API timeout for gallery {gallery_id}")
+        return None, 504  # Gateway Timeout
+    except aiohttp.ClientConnectorError as e:
+        logger.error(f"Connection error for gallery {gallery_id}: {e}")
+        return None, 503  # Service Unavailable
+    except aiohttp.ClientError as e:
+        logger.error(f"HTTP client error for gallery {gallery_id}: {e}")
+        return None, 500
+    except Exception as e:
+        logger.error(f"Unexpected error fetching gallery {gallery_id}: {e}")
+        return None, 500
 
-                if response.status == 404:
-                    await status.edit_text(
-                        f"❌ <b>Gallery not found.</b>\n\n"
-                        f"🆔 ID: <code>{gallery_id}</code>"
-                    )
-                    return
 
-                if response.status != 200:
-                    await status.edit_text(
-                        "❌ <b>API request failed.</b>\n\n"
-                        f"HTTP Status: <code>{response.status}</code>"
-                    )
-                    return
+async def search_galleries(query: str, page: int = 1) -> Tuple[Optional[List[Dict]], int]:
+    """
+    Search galleries by query.
+    
+    Args:
+        query: Search query string
+        page: Page number (default 1)
+    
+    Returns:
+        Tuple of (results list or None, HTTP status code)
+    """
+    params = {"query": query, "sort": "date", "page": page}
+    timeout = aiohttp.ClientTimeout(total=API_TIMEOUT_SECONDS)
 
-                data = await response.json()
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(SEARCH_URL, headers=HEADERS, params=params) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    results = data.get("result", [])
+                    logger.info(f"Search for '{query}' returned {len(results)} results")
+                    return results, 200
+                else:
+                    logger.error(f"Search API error: {response.status}")
+                    return None, response.status
+                    
+    except asyncio.TimeoutError:
+        logger.error(f"Search timeout for query: {query}")
+        return None, 504
+    except aiohttp.ClientConnectorError as e:
+        logger.error(f"Search connection error: {e}")
+        return None, 503
+    except aiohttp.ClientError as e:
+        logger.error(f"Search HTTP error: {e}")
+        return None, 500
+    except Exception as e:
+        logger.error(f"Unexpected search error: {e}")
+        return None, 500
 
-        # -----------------------------
-        # Basic information
-        # -----------------------------
 
-        title_data = data.get("title", {})
+# ============================================================================
+# MESSAGE FORMATTING & SENDING
+# ============================================================================
 
-        title = (
-            title_data.get("pretty")
-            or title_data.get("english")
-            or title_data.get("japanese")
-            or "Unknown"
-        )
+def _build_gallery_caption(data: Dict[str, Any], gallery_id: str) -> str:
+    """
+    Build formatted caption for gallery information.
+    
+    Args:
+        data: Gallery data from API
+        gallery_id: Gallery ID for fallback
+    
+    Returns:
+        Formatted HTML caption string
+    """
+    title_data = data.get("title", {})
+    title = (
+        title_data.get("pretty")
+        or title_data.get("english")
+        or title_data.get("japanese")
+        or "Unknown"
+    )
 
-        # -----------------------------
-        # Tags
-        # -----------------------------
+    tags = data.get("tags", [])
+    artists = get_tag_names(tags, "artist")
+    groups = get_tag_names(tags, "group")
+    languages = get_tag_names(tags, "language")
+    categories = get_tag_names(tags, "category")
+    parodies = get_tag_names(tags, "parody")
+    regular_tags = get_tag_names(tags, "tag")[:TAG_DISPLAY_LIMIT]
 
-        tags = data.get("tags", [])
+    pages = data.get("num_pages", 0)
+    favorites = data.get("num_favorites", 0)
+    upload_date = format_upload_date(data.get("upload_date", 0))
 
-        artists = get_tag_names(tags, "artist")
-        groups = get_tag_names(tags, "group")
-        languages = get_tag_names(tags, "language")
+    caption = (
+        "📚 <b>Gallery Information</b>\n\n"
+        f"🆔 <b>ID:</b> <code>{data.get('id', gallery_id)}</code>\n"
+        f"📖 <b>Title:</b> `{title}`\n\n"
+        f"👤 <b>Artist:</b> `{', '.join(artists) if artists else 'Unknown'}`\n"
+        f"👥 <b>Group:</b> `{', '.join(groups) if groups else 'Unknown'}`\n"
+        f"🌐 <b>Language:</b> `{', '.join(languages) if languages else 'Unknown'}`\n"
+        f"📂 <b>Category:</b> `{', '.join(categories) if categories else 'Unknown'}`\n"
+        f"🎭 <b>Parody:</b> `{', '.join(parodies) if parodies else 'Original'}`\n"
+        f"📄 <b>Pages:</b> `{pages}`\n"
+        f"❤️ <b>Favorites:</b> `{favorites:,}`\n"
+        f"📅 <b>Uploaded:</b> `{upload_date}`\n\n"
+        f"🏷 <b>Tags:</b>\n"
+        f"{' • '.join(regular_tags) if regular_tags else 'None'}"
+    )
 
-        # Useful broad categories
-        categories = get_tag_names(tags, "category")
-        parodies = get_tag_names(tags, "parody")
+    return caption
 
-        # Keep regular tags separate.
-        regular_tags = get_tag_names(tags, "tag")
 
-        # Limit the number of displayed tags so the message
-        # doesn't become unnecessarily huge.
-        regular_tags = regular_tags[:12]
+def _build_gallery_keyboard(gallery_id: str) -> InlineKeyboardMarkup:
+    """Build inline keyboard for gallery info."""
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🔗 Open Gallery", url=GALLERY_URL_TEMPLATE.format(gallery_id))]]
+    )
 
-        # -----------------------------
-        # Other information
-        # -----------------------------
 
-        pages = data.get("num_pages", 0)
-        favorites = data.get("num_favorites", 0)
+async def send_gallery_info(
+    message_or_query: Any,
+    data: Dict[str, Any],
+    gallery_id: str,
+) -> bool:
+    """
+    Send gallery information as a message with photo or text.
+    
+    Args:
+        message_or_query: Message or CallbackQuery object
+        data: Gallery data from API
+        gallery_id: Gallery ID
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    caption = _build_gallery_caption(data, gallery_id)
+    keyboard = _build_gallery_keyboard(gallery_id)
 
-        upload_date = format_upload_date(
-            data.get("upload_date")
-        )
+    cover = data.get("cover", {})
+    cover_path = cover.get("path")
+    
+    target_msg = (
+        message_or_query.message
+        if isinstance(message_or_query, CallbackQuery)
+        else message_or_query
+    )
 
-        artist_text = ", ".join(artists) if artists else "Unknown"
-        group_text = ", ".join(groups) if groups else "Unknown"
-        language_text = ", ".join(languages) if languages else "Unknown"
-
-        category_text = (
-            ", ".join(categories)
-            if categories
-            else "Unknown"
-        )
-
-        parody_text = (
-            ", ".join(parodies)
-            if parodies
-            else "Original"
-        )
-
-        tags_text = (
-            " • ".join(regular_tags)
-            if regular_tags
-            else "None"
-        )
-
-        # -----------------------------
-        # Response
-        # -----------------------------
-
-        caption = (
-            "📚 <b>Gallery Information</b>\n\n"
-
-            f"🆔 <b>ID:</b> <code>{data.get('id', gallery_id)}</code>\n"
-            f"📖 <b>Title:</b> {title}\n\n"
-
-            f"👤 <b>Artist:</b> {artist_text}\n"
-            f"👥 <b>Group:</b> {group_text}\n"
-            f"🌐 <b>Language:</b> {language_text}\n"
-            f"📂 <b>Category:</b> {category_text}\n"
-            f"🎭 <b>Parody:</b> {parody_text}\n"
-            f"📄 <b>Pages:</b> {pages}\n"
-            f"❤️ <b>Favorites:</b> {favorites:,}\n"
-            f"📅 <b>Uploaded:</b> {upload_date}\n\n"
-
-            f"🏷 <b>Tags:</b>\n"
-            f"{tags_text}"
-        )
-
-        keyboard = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(
-                        "🔗 Open Gallery",
-                        url=f"https://nhentai.net/g/{gallery_id}/"
-                    )
-                ]
-            ]
-        )
-
-        # -----------------------------
-        # Cover
-        # -----------------------------
-
-        cover = data.get("cover", {})
-        cover_path = cover.get("path")
-
-        # The API provides the gallery storage path.
-        # We intentionally don't download/distribute gallery pages.
-        if cover_path:
-            cover_url = f"https://t1.nhentai.net/{cover_path}"
-
-            try:
-                await status.delete()
-
-                await message.reply_photo(
+    # Try to send with photo first
+    if cover_path:
+        cover_url = COVER_URL_TEMPLATE.format(cover_path)
+        try:
+            if isinstance(message_or_query, CallbackQuery):
+                await target_msg.delete()
+                await target_msg.reply_photo(
                     photo=cover_url,
                     caption=caption,
                     reply_markup=keyboard,
                 )
+            else:
+                await target_msg.reply_photo(
+                    photo=cover_url,
+                    caption=caption,
+                    reply_markup=keyboard,
+                )
+            logger.info(f"Sent gallery {gallery_id} with photo")
+            return True
+        except aiohttp.ClientError as e:
+            logger.warning(f"Failed to fetch cover photo for {gallery_id}: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to send photo for {gallery_id}: {e}")
 
+    # Fallback to text-only
+    try:
+        if isinstance(message_or_query, CallbackQuery):
+            await target_msg.edit_text(caption, reply_markup=keyboard)
+        else:
+            await target_msg.reply_text(caption, reply_markup=keyboard)
+        logger.info(f"Sent gallery {gallery_id} as text (photo unavailable)")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to send gallery {gallery_id} as text: {e}")
+        return False
+
+
+async def send_search_results(
+    status: Message,
+    results: List[Dict[str, Any]],
+    query: str,
+) -> bool:
+    """
+    Send search results as inline buttons.
+    
+    Args:
+        status: Status message to edit
+        results: List of gallery results
+        query: Original search query
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    if not results:
+        try:
+            await status.edit_text("❌ <b>No galleries found matching your query.</b>")
+            return False
+        except Exception as e:
+            logger.error(f"Failed to edit status for empty results: {e}")
+            return False
+
+    buttons = []
+    for item in results[:SEARCH_RESULT_LIMIT]:
+        title = item.get("english_title") or f"Gallery {item.get('id')}"
+        # Truncate title for button display
+        btn_title = f"🔍 {(title[:32] + '...') if len(title) > 35 else title}"
+        item_id = item.get("id")
+
+        buttons.append(
+            [InlineKeyboardButton(text=btn_title, callback_data=f"nhget_{item_id}")]
+        )
+
+    reply_markup = InlineKeyboardMarkup(buttons)
+    
+    try:
+        await status.edit_text(
+            f"🔍 <b>Search results for:</b> <i>{query}</i>\nSelect a gallery below:",
+            reply_markup=reply_markup,
+        )
+        logger.info(f"Sent {len(buttons)} search results for query: {query}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to send search results: {e}")
+        return False
+
+
+# ============================================================================
+# MESSAGE HANDLERS
+# ============================================================================
+
+@Client.on_message(filters.command("nh"))
+async def nhentai_handler(client: Client, message: Message) -> None:
+    """Handle /nh command for direct ID/URL or text search."""
+    if len(message.command) < 2:
+        await message.reply_text(
+            "<b>Usage:</b>\n\n"
+            "• Direct Gallery: <code>/nh 644225</code>\n"
+            "• Gallery URL: <code>/nh https://nhentai.net/g/123456/</code>\n"
+            "• Search Text: <code>/nh Milf</code>"
+        )
+        return
+
+    query = message.text.split(maxsplit=1)[1].strip()
+    gallery_id = extract_gallery_id(query)
+
+    # ========== DIRECT ID / URL MATCH ==========
+    if gallery_id:
+        status = await message.reply_text("🔎 <i>Fetching gallery information...</i>")
+        try:
+            data, status_code = await fetch_gallery_data(gallery_id)
+            
+            if status_code == 404:
+                await status.edit_text(
+                    f"❌ <b>Gallery not found.</b>\n🆔 ID: <code>{gallery_id}</code>"
+                )
+                logger.info(f"Gallery {gallery_id} not found")
+                return
+            elif status_code == 504:
+                await status.edit_text(
+                    "⏱️ <b>Request timed out.</b> The API is slow. Try again in a moment."
+                )
+                return
+            elif status_code == 503:
+                await status.edit_text(
+                    "🌐 <b>API temporarily unavailable.</b> Try again later."
+                )
+                return
+            elif status_code != 200:
+                await status.edit_text(
+                    f"❌ <b>API request failed.</b>\n"
+                    f"Status: <code>{status_code}</code>"
+                )
                 return
 
-            except Exception:
-                # If the cover can't be sent, fall back to text.
+            await status.delete()
+            await send_gallery_info(message, data, gallery_id)
+            
+        except Exception as e:
+            logger.error(f"Error in nhentai_handler (ID lookup): {e}")
+            try:
+                await status.edit_text(
+                    "❌ <b>Something went wrong while fetching gallery information.</b>"
+                )
+            except:
                 pass
+        return
 
-        await status.edit_text(
-            caption,
-            reply_markup=keyboard,
-        )
+    # ========== TEXT SEARCH MATCH ==========
+    status = await message.reply_text(f"🔎 <i>Searching for:</i> <b>{query}</b>...")
+    
+    try:
+        results, status_code = await search_galleries(query, page=1)
+        
+        if status_code == 504:
+            await status.edit_text(
+                "⏱️ <b>Search timed out.</b> The API is slow. Try again in a moment."
+            )
+            return
+        elif status_code == 503:
+            await status.edit_text(
+                "🌐 <b>API temporarily unavailable.</b> Try again later."
+            )
+            return
+        elif status_code != 200:
+            await status.edit_text(
+                f"❌ <b>Search failed.</b>\n"
+                f"Status: <code>{status_code}</code>"
+            )
+            return
 
-    except aiohttp.ClientError:
-        await status.edit_text(
-            "❌ <b>Could not connect to the API.</b>\n\n"
-            "Please try again later."
-        )
-
+        await send_search_results(status, results, query)
+        
     except Exception as e:
-        print(f"nh plugin error: {e}")
+        logger.error(f"Error in nhentai_handler (search): {e}")
+        try:
+            await status.edit_text(
+                "❌ <b>Something went wrong while searching.</b>"
+            )
+        except:
+            pass
 
-        await status.edit_text(
-            "❌ <b>Something went wrong while fetching "
-            "the gallery information.</b>"
-        )
+
+@Client.on_callback_query(filters.regex(r"^nhget_(\d+)$"))
+async def nhentai_callback(client: Client, callback_query: CallbackQuery) -> None:
+    """Handle callback queries from search result buttons."""
+    gallery_id = callback_query.data.split("_")[1]
+    
+    try:
+        await callback_query.answer("Fetching gallery details...")
+
+        data, status_code = await fetch_gallery_data(gallery_id)
+        
+        if status_code != 200:
+            error_msgs = {
+                404: "Gallery not found.",
+                504: "Request timed out. Try again.",
+                503: "API temporarily unavailable.",
+            }
+            msg = error_msgs.get(status_code, f"Error (HTTP {status_code})")
+            await callback_query.message.reply_text(f"❌ <b>{msg}</b>")
+            logger.warning(f"Callback error for gallery {gallery_id}: {status_code}")
+            return
+
+        await send_gallery_info(callback_query, data, gallery_id)
+        
+    except Exception as e:
+        logger.error(f"Error in nhentai_callback: {e}")
+        try:
+            await callback_query.message.reply_text(
+                "❌ <b>An error occurred while loading details.</b>"
+            )
+        except:
+            pass

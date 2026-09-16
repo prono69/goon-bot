@@ -35,7 +35,7 @@ async def send_logs(client: Client, message: Message):
         return
 
     buttons = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("📄 Display Logs", callback_data="show_logs")]]
+        [[InlineKeyboardButton("📄 Display Logs", style="success", callback_data="show_logs")]]
     )
 
     with io.BytesIO(file_bytes) as out_file:
