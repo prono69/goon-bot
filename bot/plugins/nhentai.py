@@ -220,7 +220,7 @@ async def search_galleries(query: str, page: int = 1) -> Tuple[Optional[List[Dic
     Returns:
         Tuple of (results list or None, HTTP status code)
     """
-    params = {"query": query, "sort": "date", "page": page}
+    params = {"query": query, "sort": "popular", "page": page}
     timeout = aiohttp.ClientTimeout(total=API_TIMEOUT_SECONDS)
 
     try:
@@ -311,9 +311,11 @@ def _build_gallery_keyboard(gallery_id: str) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     "🔗 Open Gallery",
                     url=GALLERY_URL_TEMPLATE.format(gallery_id),
+                    style=enums.ButtonStyle.SUCCESS,
                 ),
                 InlineKeyboardButton(
-                    "📥 Download CBZ", callback_data=f"nhdl_{gallery_id}"
+                    "📥 Download CBZ", callback_data=f"nhdl_{gallery_id}",
+                    style=enums.ButtonStyle.PRIMARY
                 ),
             ]
         ]
@@ -646,9 +648,9 @@ async def nhentai_download_callback(
         )
 
         caption = (
-            f"🎬 <b>{name}</b>\n\n"
-            f"📊 <b>Format:</b> CBZ ({total_pages} Pages)\n\n"
-            f"🔗 <b>Source:</b> nHentai #{gallery_id}\n\n"
+            f"📖 <b>{name}</b>\n\n"
+            f"📊 <b>Format:</b> CBZ ({total_pages} Pages)\n"
+            f"🔗 <b>Source:</b> nHentai `#{gallery_id}`\n\n"
             f"🏷 {formatted_tags if formatted_tags else '#nHentai'}"
         )
 
