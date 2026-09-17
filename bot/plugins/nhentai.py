@@ -7,7 +7,7 @@ from typing import Optional, Dict, Any, List, Tuple
 
 import aiohttp
 from bot import logger
-from bot.utils.nhentai_dl import cleanup_dir_and_files, create_cbz_archive
+from bot.utils.nhentai_dl import cleanup_dir_and_files, create_cbz_archive, make_progress_bar
 from bot.config import NHENTAI_API_KEY
 from pyrogram import Client, filters, enums
 from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -566,13 +566,6 @@ async def nhentai_callback(client: Client, callback_query: CallbackQuery) -> Non
             )
         except:
             pass
-
-def make_progress_bar(current: int, total: int, length: int = 10) -> str:
-    """Generate a clean visual progress bar."""
-    filled = int(length * current / total)
-    bar = "█" * filled + "░" * (length - filled)
-    percent = int(100 * (current / total))
-    return f"[{bar}] {percent}%"
 
 
 @Client.on_callback_query(filters.regex(r"^nhdl_(\d+)$"))

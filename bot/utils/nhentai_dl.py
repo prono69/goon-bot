@@ -180,3 +180,11 @@ def cleanup_dir_and_files(*paths: Optional[str]) -> None:
                     os.remove(path)
             except Exception as e:
                 logger.error(f"Error cleaning up path {path}: {e}")
+
+
+def make_progress_bar(current: int, total: int, length: int = 10) -> str:
+    """Generate a clean visual progress bar."""
+    filled = int(length * current / total)
+    bar = "█" * filled + "░" * (length - filled)
+    percent = int(100 * (current / total))
+    return f"[{bar}] {percent}%"
