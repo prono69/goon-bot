@@ -1,10 +1,11 @@
 import json
 import re
-from urllib.parse import quote_plus, urljoin
+from urllib.parse import quote, urljoin
 import aiohttp
 from bs4 import BeautifulSoup
 from html_telegraph_poster import TelegraphPoster
 from pyrogram import Client, filters
+from pyrogram.errors import WebpageCurlFailed, BadRequest
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 HEADERS = {
@@ -16,6 +17,14 @@ HEADERS = {
 }
 
 BABEPEDIA_BASE = "https://www.babepedia.com"
+
+
+def safe_urljoin(base: str, path: str) -> str:
+    """Safely encodes URL paths without breaking URL structure."""
+    if not path:
+        return ""
+    joined = urljoin(base, path)
+    return quote(joined, safe="/:?=&")
 
 
 def get_bio_field(soup: BeautifulSoup, label: str) -> str:
@@ -55,7 +64,7 @@ def create_telegraph_page(title: str, img_urls: list[str]) -> str | None:
 async def search_and_scrape_babepedia(
     session: aiohttp.ClientSession, query: str
 ) -> tuple[dict | None, list[list[InlineKeyboardButton]]]:
-    search_url = f"{BABEPEDIA_BASE}/ajax-search.php?term={quote_plus(query)}"
+    search_url = f"{BABEPEDIA_BASE}/ajax-search.php?term={quote(query)}"
     async with session.get(search_url, headers=HEADERS) as resp:
         if resp.status != 200:
             return None, []
@@ -102,7 +111,6 @@ async def search_and_scrape_babepedia(
         if votes_match:
             votes_str = f"{votes_match.group(1)} votes"
 
-    # Fallback to JSON-LD Schema
     if rating_str == "N/A":
         json_ld_scripts = soup.find_all("script", type="application/ld+json")
         for script in json_ld_scripts:
@@ -150,10 +158,10 @@ async def search_and_scrape_babepedia(
     # High quality profile photo extraction
     hq_img = soup.find("div", id="profbox2")
     if hq_img and (img_link := hq_img.find("a", class_="img")):
-        data["photo"] = urljoin(BABEPEDIA_BASE, quote_plus(img_link.get("href", ""), safe="/:"))
+        data["photo"] = safe_urljoin(BABEPEDIA_BASE, img_link.get("href", ""))
     else:
         main_img = soup.find("img", id="bioimg")
-        data["photo"] = urljoin(BABEPEDIA_BASE, quote_plus(main_img.get("src", ""), safe="/:")) if main_img else None
+        data["photo"] = safe_urljoin(BABEPEDIA_BASE, main_img.get("src", "")) if main_img else None
 
     # --- NO THUMBNAILS: HQ PROFILE IMAGES FIRST -> USER UPLOADS SECOND ---
     gallery_imgs = []
@@ -162,7 +170,7 @@ async def search_and_scrape_babepedia(
     for a_tag in soup.select("#profbox2 a.img[href]"):
         href = a_tag.get("href", "")
         if href and not href.startswith("/uploadphotos/"):
-            full_url = urljoin(BABEPEDIA_BASE, quote_plus(href, safe="/:"))
+            full_url = safe_urljoin(BABEPEDIA_BASE, href)
             if full_url not in gallery_imgs:
                 gallery_imgs.append(full_url)
 
@@ -172,7 +180,7 @@ async def search_and_scrape_babepedia(
         for a_tag in user_uploads_container.select("a.img[href]"):
             href = a_tag.get("href", "")
             if href and not href.startswith("/uploadphotos/"):
-                full_url = urljoin(BABEPEDIA_BASE, quote_plus(href, safe="/:"))
+                full_url = safe_urljoin(BABEPEDIA_BASE, href)
                 if full_url not in gallery_imgs:
                     gallery_imgs.append(full_url)
 
@@ -281,14 +289,20 @@ async def babe_handler(client: Client, message: Message):
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
     await status_msg.delete()
 
+    # Fallback wrapper in case Telegram fails to curl the image URL
     if data.get("photo"):
-        await message.reply_photo(
-            photo=data["photo"],
-            caption=caption,
-            reply_markup=reply_markup,
-        )
-    else:
-        await message.reply_text(
-            text=caption,
-            reply_markup=reply_markup,
-        )
+        try:
+            await message.reply_photo(
+                photo=data["photo"],
+                caption=caption,
+                reply_markup=reply_markup,
+            )
+            return
+        except (WebpageCurlFailed, BadRequest):
+            pass
+
+    # Fallback to text message if photo reply fails
+    await message.reply_text(
+        text=caption,
+        reply_markup=reply_markup,
+    )
