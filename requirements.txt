@@ -9,3 +9,4 @@ aiohttp
 Pillow
 psutil
 python-dotenv
+html-telegraph-poster

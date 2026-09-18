@@ -3,9 +3,9 @@ import re
 from urllib.parse import quote_plus, urljoin
 import aiohttp
 from bs4 import BeautifulSoup
+from html_telegraph_poster import TelegraphPoster
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
-
 
 HEADERS = {
     "User-Agent": (
@@ -30,6 +30,26 @@ def get_bio_field(soup: BeautifulSoup, label: str) -> str:
             text = re.sub(r",([^\s])", r", \1", text)
             return text.strip()
     return "N/A"
+
+
+def create_telegraph_page(title: str, img_urls: list[str]) -> str | None:
+    """Posts gallery images to Telegraph using html_telegraph_poster."""
+    try:
+        t = TelegraphPoster(use_api=True, telegraph_api_url='https://api.graph.org')
+        t.create_api_token("BabepediaBot")
+        
+        html_content = f"<p>{title} Photos (Uploaded By Our Users)</p>"
+        for img_url in img_urls:
+            html_content += f'<img src="{img_url}"/><br/>'
+            
+        page = t.post(
+            title="ScreenShots",
+            author="Babepedia",
+            text=html_content
+        )
+        return page.get("url")
+    except Exception:
+        return None
 
 
 async def search_and_scrape_babepedia(
@@ -82,7 +102,6 @@ async def search_and_scrape_babepedia(
         if votes_match:
             votes_str = f"{votes_match.group(1)} votes"
             
-    # Fallback to schema if .rating-global wasn't present
     if rating_str == "N/A":
         json_ld_scripts = soup.find_all("script", type="application/ld+json")
         for script in json_ld_scripts:
@@ -135,6 +154,28 @@ async def search_and_scrape_babepedia(
         main_img = soup.find("img", id="bioimg")
         data["photo"] = urljoin(BABEPEDIA_BASE, main_img.get("src", "")) if main_img else None
 
+    # --- GALLERY EXTRACTION & TELEGRAPH CREATION ---
+    gallery_imgs = []
+    # Scraping thumbnail gallery links
+    for img_tag in soup.select("a.img img, #thumbs img, .tn img"):
+        src = img_tag.get("src", "")
+        if src:
+            # Convert thumbnail paths to full resolution images where possible
+            full_src = src.replace("/thumbs/", "/full/").replace("_tn.", ".")
+            gallery_imgs.append(urljoin(BABEPEDIA_BASE, full_src))
+
+    # Fallback to main photo if no thumbnails found
+    if not gallery_imgs and data.get("photo"):
+        gallery_imgs.append(data["photo"])
+
+    # Create Telegraph page
+    telegraph_url = None
+    if gallery_imgs:
+        telegraph_url = create_telegraph_page(data["name"], gallery_imgs)
+
+    # Use Telegraph link if available, fallback to profile_url
+    gallery_btn_url = telegraph_url if telegraph_url else profile_url
+
     # Detect Platform Names for Social Buttons
     proxy_map = {
         "/onlyfans/": ("OnlyFans", "https://onlyfans.com/"),
@@ -175,7 +216,7 @@ async def search_and_scrape_babepedia(
 
         row_buttons.append(InlineKeyboardButton(f"{title} ↗", url=final_url))
 
-    keyboard = [[InlineKeyboardButton("Gallery/Bio ↗", url=profile_url)]]
+    keyboard = [[InlineKeyboardButton("Gallery/Bio ↗", url=gallery_btn_url)]]
     for i in range(0, len(row_buttons), 2):
         keyboard.append(row_buttons[i : i + 2])
 
