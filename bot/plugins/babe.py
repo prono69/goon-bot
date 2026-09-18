@@ -33,15 +33,15 @@ def get_bio_field(soup: BeautifulSoup, label: str) -> str:
 
 
 def create_telegraph_page(title: str, img_urls: list[str]) -> str | None:
-    """Posts gallery images to Telegraph using html_telegraph_poster."""
+    """Posts full-res gallery images to Telegraph using html_telegraph_poster."""
     try:
         t = TelegraphPoster(use_api=True, telegraph_api_url='https://api.graph.org')
         t.create_api_token("BabepediaBot")
-        
+
         html_content = f"<p>{title} Photos (Uploaded By Our Users)</p>"
         for img_url in img_urls:
             html_content += f'<img src="{img_url}"/><br/>'
-            
+
         page = t.post(
             title="ScreenShots",
             author="Babepedia",
@@ -87,7 +87,7 @@ async def search_and_scrape_babepedia(
     else:
         data["aka"] = "N/A"
 
-    # --- DIRECT .rating-global PARSING ---
+    # --- ACCURATE RATING & VOTES EXTRACTION ---
     rating_str = "N/A"
     votes_str = "N/A"
 
@@ -101,7 +101,8 @@ async def search_and_scrape_babepedia(
             rating_str = score_match.group(1)
         if votes_match:
             votes_str = f"{votes_match.group(1)} votes"
-            
+
+    # Fallback to JSON-LD Schema
     if rating_str == "N/A":
         json_ld_scripts = soup.find_all("script", type="application/ld+json")
         for script in json_ld_scripts:
@@ -121,7 +122,7 @@ async def search_and_scrape_babepedia(
     data["rating"] = rating_str
     data["votes"] = votes_str
 
-    # Scraping Fields
+    # Scraping Bio Fields
     data["age"] = get_bio_field(soup, "Age")
     data["born"] = get_bio_field(soup, "Born")
     data["years_active"] = get_bio_field(soup, "Years active")
@@ -146,25 +147,36 @@ async def search_and_scrape_babepedia(
     data["boy_girl"] = get_bio_field(soup, "Boy/girl")
     data["special"] = get_bio_field(soup, "Special")
 
-    # High quality photo extraction
+    # High quality profile photo extraction
     hq_img = soup.find("div", id="profbox2")
     if hq_img and (img_link := hq_img.find("a", class_="img")):
-        data["photo"] = urljoin(BABEPEDIA_BASE, img_link.get("href", ""))
+        data["photo"] = urljoin(BABEPEDIA_BASE, quote_plus(img_link.get("href", ""), safe="/:"))
     else:
         main_img = soup.find("img", id="bioimg")
-        data["photo"] = urljoin(BABEPEDIA_BASE, main_img.get("src", "")) if main_img else None
+        data["photo"] = urljoin(BABEPEDIA_BASE, quote_plus(main_img.get("src", ""), safe="/:")) if main_img else None
 
-    # --- GALLERY EXTRACTION & TELEGRAPH CREATION ---
+    # --- NO THUMBNAILS: HQ PROFILE IMAGES FIRST -> USER UPLOADS SECOND ---
     gallery_imgs = []
-    # Scraping thumbnail gallery links
-    for img_tag in soup.select("a.img img, #thumbs img, .tn img"):
-        src = img_tag.get("src", "")
-        if src:
-            # Convert thumbnail paths to full resolution images where possible
-            full_src = src.replace("/thumbs/", "/full/").replace("_tn.", ".")
-            gallery_imgs.append(urljoin(BABEPEDIA_BASE, full_src))
 
-    # Fallback to main photo if no thumbnails found
+    # 1. Fetch main high-quality profile gallery images first (#profbox2)
+    for a_tag in soup.select("#profbox2 a.img[href]"):
+        href = a_tag.get("href", "")
+        if href and not href.startswith("/uploadphotos/"):
+            full_url = urljoin(BABEPEDIA_BASE, quote_plus(href, safe="/:"))
+            if full_url not in gallery_imgs:
+                gallery_imgs.append(full_url)
+
+    # 2. Append full-resolution user uploads second (.useruploads2)
+    user_uploads_container = soup.select_one(".useruploads2")
+    if user_uploads_container:
+        for a_tag in user_uploads_container.select("a.img[href]"):
+            href = a_tag.get("href", "")
+            if href and not href.startswith("/uploadphotos/"):
+                full_url = urljoin(BABEPEDIA_BASE, quote_plus(href, safe="/:"))
+                if full_url not in gallery_imgs:
+                    gallery_imgs.append(full_url)
+
+    # 3. Fallback to main profile picture if no gallery exists
     if not gallery_imgs and data.get("photo"):
         gallery_imgs.append(data["photo"])
 
@@ -173,7 +185,6 @@ async def search_and_scrape_babepedia(
     if gallery_imgs:
         telegraph_url = create_telegraph_page(data["name"], gallery_imgs)
 
-    # Use Telegraph link if available, fallback to profile_url
     gallery_btn_url = telegraph_url if telegraph_url else profile_url
 
     # Detect Platform Names for Social Buttons
