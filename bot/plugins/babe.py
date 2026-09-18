@@ -1,9 +1,11 @@
+import json
 import re
 from urllib.parse import quote_plus, urljoin
 import aiohttp
 from bs4 import BeautifulSoup
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
+
 
 HEADERS = {
     "User-Agent": (
@@ -23,17 +25,16 @@ def get_bio_field(soup: BeautifulSoup, label: str) -> str:
     if label_span:
         sibling = label_span.find_next_sibling("span")
         if sibling:
-            # Clean inner text and strip unwanted hidden button texts like 'show conversions'
             text = sibling.get_text(" ", strip=True)
             text = re.sub(r"show conversions.*", "", text, flags=re.IGNORECASE)
-            # Fix tight punctuation spacing
             text = re.sub(r",([^\s])", r", \1", text)
             return text.strip()
     return "N/A"
 
 
-async def search_and_scrape_babepedia(session: aiohttp.ClientSession, query: str) -> tuple[dict | None, list[list[InlineKeyboardButton]]]:
-    # 1. Search Babepedia AJAX endpoint
+async def search_and_scrape_babepedia(
+    session: aiohttp.ClientSession, query: str
+) -> tuple[dict | None, list[list[InlineKeyboardButton]]]:
     search_url = f"{BABEPEDIA_BASE}/ajax-search.php?term={quote_plus(query)}"
     async with session.get(search_url, headers=HEADERS) as resp:
         if resp.status != 200:
@@ -43,10 +44,9 @@ async def search_and_scrape_babepedia(session: aiohttp.ClientSession, query: str
     if not search_results:
         return None, []
 
-    best_match = search_results[0]['value'].replace(" ", "_")
+    best_match = search_results[0]["value"].replace(" ", "_")
     profile_url = f"{BABEPEDIA_BASE}/babe/{best_match}"
 
-    # 2. Fetch the performer profile page
     async with session.get(profile_url, headers=HEADERS) as resp:
         if resp.status != 200:
             return None, []
@@ -55,11 +55,11 @@ async def search_and_scrape_babepedia(session: aiohttp.ClientSession, query: str
     soup = BeautifulSoup(html_text, "html.parser")
     data = {"url": profile_url}
 
-    # Extract Name
+    # Clean Name
     h1_name = soup.find("h1", id="babename")
     data["name"] = h1_name.get_text(strip=True) if h1_name else query.title()
 
-    # Extract AKA
+    # Clean AKA
     h2_aka = soup.find("h2", id="aka")
     if h2_aka:
         raw_aka = h2_aka.get_text(" ", strip=True)
@@ -67,28 +67,47 @@ async def search_and_scrape_babepedia(session: aiohttp.ClientSession, query: str
     else:
         data["aka"] = "N/A"
 
-    # --- FIX FOR RATING & VOTES ---
-    # Extract rating value from schema microdata or fallback to header text parsing
-    rating_val = soup.find("span", itemprop="ratingValue") or soup.find("meta", itemprop="ratingValue")
-    votes_val = soup.find("span", itemprop="reviewCount") or soup.find("span", itemprop="ratingCount") or soup.find("meta", itemprop="ratingCount")
+    # --- ACCURATE RATING & VOTES EXTRACTION ---
+    rating_str = "N/A"
+    votes_str = "N/A"
 
-    if rating_val:
-        data["rating"] = rating_val.get("content") or rating_val.get_text(strip=True)
-    else:
-        # Fallback: Parse from header string like "8.35/10"
-        rate_match = re.search(r"(\d+(?:\.\d+)?)\s*/\s*10", html_text)
-        data["rating"] = rate_match.group(1) if rate_match else "N/A"
+    json_ld_scripts = soup.find_all("script", type="application/ld+json")
+    for script in json_ld_scripts:
+        if script.string:
+            try:
+                ld_data = json.loads(script.string)
+                if isinstance(ld_data, dict):
+                    agg = ld_data.get("aggregateRating") or ld_data
+                    if "ratingValue" in agg:
+                        rating_str = str(agg.get("ratingValue"))
+                    if "reviewCount" in agg or "ratingCount" in agg:
+                        votes_count = agg.get("reviewCount") or agg.get("ratingCount")
+                        votes_str = f"{votes_count} votes"
+            except json.JSONDecodeError:
+                continue
 
-    if votes_val:
-        data["votes"] = votes_val.get("content") or votes_val.get_text(strip=True)
-        if not data["votes"].lower().endswith("votes"):
-            data["votes"] = f"{data['votes']} votes"
-    else:
-        # Fallback: Parse vote count pattern
-        vote_match = re.search(r"(\d+)\s+votes", html_text, re.IGNORECASE)
-        data["votes"] = f"{vote_match.group(1)} votes" if vote_match else "N/A"
+    if rating_str == "N/A":
+        rating_elem = soup.find(attrs={"itemprop": "ratingValue"})
+        if rating_elem:
+            rating_str = rating_elem.get_text(strip=True)
+        else:
+            rate_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:/10|out of 10)", html_text, re.IGNORECASE)
+            if rate_match:
+                rating_str = rate_match.group(1)
 
-    # Scraping standard bio fields
+    if votes_str == "N/A":
+        votes_elem = soup.find(attrs={"itemprop": "ratingCount"}) or soup.find(attrs={"itemprop": "reviewCount"})
+        if votes_elem:
+            votes_str = f"{votes_elem.get_text(strip=True)} votes"
+        else:
+            vote_match = re.search(r"(\d+)\s+votes", html_text, re.IGNORECASE)
+            if vote_match:
+                votes_str = f"{vote_match.group(1)} votes"
+
+    data["rating"] = rating_str
+    data["votes"] = votes_str
+
+    # Scraping Fields
     data["age"] = get_bio_field(soup, "Age")
     data["born"] = get_bio_field(soup, "Born")
     data["years_active"] = get_bio_field(soup, "Years active")
@@ -113,7 +132,7 @@ async def search_and_scrape_babepedia(session: aiohttp.ClientSession, query: str
     data["boy_girl"] = get_bio_field(soup, "Boy/girl")
     data["special"] = get_bio_field(soup, "Special")
 
-    # High-quality photo extraction
+    # High quality photo extraction
     hq_img = soup.find("div", id="profbox2")
     if hq_img and (img_link := hq_img.find("a", class_="img")):
         data["photo"] = urljoin(BABEPEDIA_BASE, img_link.get("href", ""))
@@ -121,7 +140,7 @@ async def search_and_scrape_babepedia(session: aiohttp.ClientSession, query: str
         main_img = soup.find("img", id="bioimg")
         data["photo"] = urljoin(BABEPEDIA_BASE, main_img.get("src", "")) if main_img else None
 
-    # Dynamic Social Buttons
+    # Detect Platform Names for Social Buttons
     proxy_map = {
         "/onlyfans/": ("OnlyFans", "https://onlyfans.com/"),
         "/fansly/": ("Fansly", "https://fansly.com/"),
@@ -163,10 +182,9 @@ async def search_and_scrape_babepedia(session: aiohttp.ClientSession, query: str
 
     keyboard = [[InlineKeyboardButton("Gallery/Bio ↗", url=profile_url)]]
     for i in range(0, len(row_buttons), 2):
-        keyboard.append(row_buttons[i:i+2])
+        keyboard.append(row_buttons[i : i + 2])
 
     return data, keyboard
-
 
 
 @Client.on_message(filters.command("babe"))
@@ -188,7 +206,7 @@ async def babe_handler(client: Client, message: Message):
     caption = (
         f"**{data['name']}**\n"
         f"**Also known as:** {data['aka']}\n"
-        f"**Rating:** ⭐ {data['rating']} ({data['votes']})\n\n"
+        f"**Rating:** ⭐ {data['rating']}/10 ({data['votes']})\n\n"
         f"**Age::** {data['age']}\n"
         f"**Born::** {data['born']}\n"
         f"**Years active::** {data['years_active']}\n"
