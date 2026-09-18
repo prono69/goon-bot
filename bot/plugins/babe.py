@@ -67,42 +67,37 @@ async def search_and_scrape_babepedia(
     else:
         data["aka"] = "N/A"
 
-    # --- ACCURATE RATING & VOTES EXTRACTION ---
+    # --- DIRECT .rating-global PARSING ---
     rating_str = "N/A"
     votes_str = "N/A"
 
-    json_ld_scripts = soup.find_all("script", type="application/ld+json")
-    for script in json_ld_scripts:
-        if script.string:
-            try:
-                ld_data = json.loads(script.string)
-                if isinstance(ld_data, dict):
-                    agg = ld_data.get("aggregateRating") or ld_data
-                    if "ratingValue" in agg:
-                        rating_str = str(agg.get("ratingValue"))
-                    if "reviewCount" in agg or "ratingCount" in agg:
-                        votes_count = agg.get("reviewCount") or agg.get("ratingCount")
-                        votes_str = f"{votes_count} votes"
-            except json.JSONDecodeError:
-                continue
+    rating_elem = soup.select_one(".rating-global")
+    if rating_elem:
+        text = rating_elem.get_text(" ", strip=True)
+        score_match = re.search(r"(\d+(?:\.\d+)?)\s*/\s*10", text)
+        votes_match = re.search(r"([\d,]+)\s*votes?", text, re.IGNORECASE)
 
+        if score_match:
+            rating_str = score_match.group(1)
+        if votes_match:
+            votes_str = f"{votes_match.group(1)} votes"
+            
+    # Fallback to schema if .rating-global wasn't present
     if rating_str == "N/A":
-        rating_elem = soup.find(attrs={"itemprop": "ratingValue"})
-        if rating_elem:
-            rating_str = rating_elem.get_text(strip=True)
-        else:
-            rate_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:/10|out of 10)", html_text, re.IGNORECASE)
-            if rate_match:
-                rating_str = rate_match.group(1)
-
-    if votes_str == "N/A":
-        votes_elem = soup.find(attrs={"itemprop": "ratingCount"}) or soup.find(attrs={"itemprop": "reviewCount"})
-        if votes_elem:
-            votes_str = f"{votes_elem.get_text(strip=True)} votes"
-        else:
-            vote_match = re.search(r"(\d+)\s+votes", html_text, re.IGNORECASE)
-            if vote_match:
-                votes_str = f"{vote_match.group(1)} votes"
+        json_ld_scripts = soup.find_all("script", type="application/ld+json")
+        for script in json_ld_scripts:
+            if script.string:
+                try:
+                    ld_data = json.loads(script.string)
+                    if isinstance(ld_data, dict):
+                        agg = ld_data.get("aggregateRating") or ld_data
+                        if "ratingValue" in agg:
+                            rating_str = str(agg.get("ratingValue"))
+                        if "reviewCount" in agg or "ratingCount" in agg:
+                            votes_count = agg.get("reviewCount") or agg.get("ratingCount")
+                            votes_str = f"{votes_count} votes"
+                except json.JSONDecodeError:
+                    continue
 
     data["rating"] = rating_str
     data["votes"] = votes_str
@@ -245,4 +240,3 @@ async def babe_handler(client: Client, message: Message):
             text=caption,
             reply_markup=reply_markup,
         )
-
