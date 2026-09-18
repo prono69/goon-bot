@@ -10,3 +10,4 @@ Pillow
 psutil
 python-dotenv
 html-telegraph-poster
+lxml_html_clean
