@@ -32,9 +32,8 @@ def get_bio_field(soup: BeautifulSoup, label: str) -> str:
     return "N/A"
 
 
-async def search_and_scrape_babepedia(
-    session: aiohttp.ClientSession, query: str
-) -> tuple[dict | None, list[list[InlineKeyboardButton]]]:
+async def search_and_scrape_babepedia(session: aiohttp.ClientSession, query: str) -> tuple[dict | None, list[list[InlineKeyboardButton]]]:
+    # 1. Search Babepedia AJAX endpoint
     search_url = f"{BABEPEDIA_BASE}/ajax-search.php?term={quote_plus(query)}"
     async with session.get(search_url, headers=HEADERS) as resp:
         if resp.status != 200:
@@ -44,9 +43,10 @@ async def search_and_scrape_babepedia(
     if not search_results:
         return None, []
 
-    best_match = search_results[0]["value"].replace(" ", "_")
+    best_match = search_results[0]['value'].replace(" ", "_")
     profile_url = f"{BABEPEDIA_BASE}/babe/{best_match}"
 
+    # 2. Fetch the performer profile page
     async with session.get(profile_url, headers=HEADERS) as resp:
         if resp.status != 200:
             return None, []
@@ -55,11 +55,11 @@ async def search_and_scrape_babepedia(
     soup = BeautifulSoup(html_text, "html.parser")
     data = {"url": profile_url}
 
-    # Clean Name
+    # Extract Name
     h1_name = soup.find("h1", id="babename")
     data["name"] = h1_name.get_text(strip=True) if h1_name else query.title()
 
-    # Clean AKA (strip 'AKA:' or 'Also known as:' if already present)
+    # Extract AKA
     h2_aka = soup.find("h2", id="aka")
     if h2_aka:
         raw_aka = h2_aka.get_text(" ", strip=True)
@@ -67,14 +67,28 @@ async def search_and_scrape_babepedia(
     else:
         data["aka"] = "N/A"
 
-    # Rating & Votes
-    rating_div = soup.find("div", class_="rating")
-    data["rating"] = rating_div.get_text(strip=True) if rating_div else "N/A"
+    # --- FIX FOR RATING & VOTES ---
+    # Extract rating value from schema microdata or fallback to header text parsing
+    rating_val = soup.find("span", itemprop="ratingValue") or soup.find("meta", itemprop="ratingValue")
+    votes_val = soup.find("span", itemprop="reviewCount") or soup.find("span", itemprop="ratingCount") or soup.find("meta", itemprop="ratingCount")
 
-    votes_span = soup.find("span", class_="votes")
-    data["votes"] = votes_span.get_text(strip=True) if votes_span else "N/A"
+    if rating_val:
+        data["rating"] = rating_val.get("content") or rating_val.get_text(strip=True)
+    else:
+        # Fallback: Parse from header string like "8.35/10"
+        rate_match = re.search(r"(\d+(?:\.\d+)?)\s*/\s*10", html_text)
+        data["rating"] = rate_match.group(1) if rate_match else "N/A"
 
-    # Scraping Fields
+    if votes_val:
+        data["votes"] = votes_val.get("content") or votes_val.get_text(strip=True)
+        if not data["votes"].lower().endswith("votes"):
+            data["votes"] = f"{data['votes']} votes"
+    else:
+        # Fallback: Parse vote count pattern
+        vote_match = re.search(r"(\d+)\s+votes", html_text, re.IGNORECASE)
+        data["votes"] = f"{vote_match.group(1)} votes" if vote_match else "N/A"
+
+    # Scraping standard bio fields
     data["age"] = get_bio_field(soup, "Age")
     data["born"] = get_bio_field(soup, "Born")
     data["years_active"] = get_bio_field(soup, "Years active")
@@ -99,7 +113,7 @@ async def search_and_scrape_babepedia(
     data["boy_girl"] = get_bio_field(soup, "Boy/girl")
     data["special"] = get_bio_field(soup, "Special")
 
-    # High quality photo extraction
+    # High-quality photo extraction
     hq_img = soup.find("div", id="profbox2")
     if hq_img and (img_link := hq_img.find("a", class_="img")):
         data["photo"] = urljoin(BABEPEDIA_BASE, img_link.get("href", ""))
@@ -107,7 +121,7 @@ async def search_and_scrape_babepedia(
         main_img = soup.find("img", id="bioimg")
         data["photo"] = urljoin(BABEPEDIA_BASE, main_img.get("src", "")) if main_img else None
 
-    # Detect Platform Names for Social Buttons
+    # Dynamic Social Buttons
     proxy_map = {
         "/onlyfans/": ("OnlyFans", "https://onlyfans.com/"),
         "/fansly/": ("Fansly", "https://fansly.com/"),
@@ -134,7 +148,6 @@ async def search_and_scrape_babepedia(
                 break
 
         if not title:
-            # Check classes for platform names
             classes = " ".join(a_tag.get("class", []))
             for key in ["instagram", "twitter", "onlyfans", "fansly", "tiktok", "imdb", "iafd"]:
                 if key in classes.lower() or key in href.lower():
@@ -148,12 +161,12 @@ async def search_and_scrape_babepedia(
 
         row_buttons.append(InlineKeyboardButton(f"{title} ↗", url=final_url))
 
-    # Grid alignment: Top button standalone, social buttons 2 per row to prevent text cutoff
     keyboard = [[InlineKeyboardButton("Gallery/Bio ↗", url=profile_url)]]
     for i in range(0, len(row_buttons), 2):
-        keyboard.append(row_buttons[i : i + 2])
+        keyboard.append(row_buttons[i:i+2])
 
     return data, keyboard
+
 
 
 @Client.on_message(filters.command("babe"))
