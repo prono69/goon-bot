@@ -236,47 +236,11 @@ async def babe_handler(client: Client, message: Message):
         await status_msg.edit_text(f"❌ No results found for **{query}**.")
         return
 
-    # Build eye-catching caption with sections and emojis
-    emoji_map = {
-        "age": "🎂", "born": "📍", "years_active": "🎬", "birthplace": "🌍",
-        "nationality": "🏳️", "ethnicity": "👤", "professions": "💼", "sexuality": "💕",
-        "hair_color": "💇", "eye_color": "👁️", "height": "📏", "weight": "⚖️",
-        "body_type": "🔰", "measurements": "📐", "bra/cup_size": "👙", "boobs": "✨",
-        "tattoos": "🎨", "piercings": "💎", "solo": "🎭", "girl/girl": "👯",
-        "boy/girl": "💑", "special": "⚡"
-    }
-    
     caption = (
-        f"✨ **{data['name'].upper()}** ✨\n"
-        f"*Also known as:* {data['aka']}\n"
-        f"{'⭐' * int(float(data['rating']) / 2)} **{data['rating']}/10** ({data['votes']})\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"👤 **PERSONAL INFO**\n"
-        f"{emoji_map['age']} Age: {data['age']}\n"
-        f"{emoji_map['born']} Born: {data['born']}\n"
-        f"{emoji_map['birthplace']} Birthplace: {data['birthplace']}\n"
-        f"{emoji_map['nationality']} Nationality: {data['nationality']}\n"
-        f"{emoji_map['ethnicity']} Ethnicity: {data['ethnicity']}\n"
-        f"{emoji_map['professions']} Professions: {data['professions']}\n"
-        f"{emoji_map['sexuality']} Sexuality: {data['sexuality']}\n"
-        f"{emoji_map['years_active']} Years Active: {data['years_active']}\n\n"
-        f"🎀 **PHYSICAL ATTRIBUTES**\n"
-        f"{emoji_map['hair_color']} Hair: {data['hair_color']}\n"
-        f"{emoji_map['eye_color']} Eyes: {data['eye_color']}\n"
-        f"{emoji_map['height']} Height: {data['height']}\n"
-        f"{emoji_map['weight']} Weight: {data['weight']}\n"
-        f"{emoji_map['body_type']} Body Type: {data['body_type']}\n"
-        f"{emoji_map['measurements']} Measurements: {data['measurements']}\n"
-        f"{emoji_map['bra/cup_size']} Bra Size: {data['bra/cup_size']}\n"
-        f"{emoji_map['boobs']} Boobs: {data['boobs']}\n"
-        f"{emoji_map['tattoos']} Tattoos: {data['tattoos']}\n"
-        f"{emoji_map['piercings']} Piercings: {data['piercings']}\n\n"
-        f"🎥 **SPECIALTIES**\n"
-        f"{emoji_map['solo']} Solo: {data['solo']}\n"
-        f"{emoji_map['girl/girl']} Girl/Girl: {data['girl/girl']}\n"
-        f"{emoji_map['boy/girl']} Boy/Girl: {data['boy/girl']}\n"
-        f"{emoji_map['special']} Special: {data['special']}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━"
+        f"**{data['name']}**\n"
+        f"**Also known as:** {data['aka']}\n"
+        f"**Rating:** ⭐ {data['rating']}/10 ({data['votes']})\n\n"
+        + "\n".join(f"**{field}:** {data.get(field.lower().replace(' ', '_'), 'N/A')}" for field in BIO_FIELDS)
     )
 
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
