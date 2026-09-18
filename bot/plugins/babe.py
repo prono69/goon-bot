@@ -5,7 +5,7 @@ import aiohttp
 from bs4 import BeautifulSoup
 from html_telegraph_poster import TelegraphPoster
 from pyrogram import Client, filters
-from pyrogram.errors import WebpageCurlFailed, BadRequest
+from pyrogram.errors import BadRequest, WebpageCurlFailed
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 HEADERS = {
@@ -44,15 +44,15 @@ def get_bio_field(soup: BeautifulSoup, label: str) -> str:
 def create_telegraph_page(title: str, img_urls: list[str]) -> str | None:
     """Posts full-res gallery images to Telegraph using html_telegraph_poster."""
     try:
-        t = TelegraphPoster(use_api=True, telegraph_api_url='https://api.graph.org')
+        t = TelegraphPoster(use_api=True, telegraph_api_url="https://api.graph.org")
         t.create_api_token("BabepediaBot")
 
-        html_content = f"<p>{title} Photos (Uploaded By Our Users)</p>"
+        html_content = f"<p>{title} Photos</p>"
         for img_url in img_urls:
             html_content += f'<img src="{img_url}"/><br/>'
 
         page = t.post(
-            title="ScreenShots",
+            title=f"{title} Gallery",
             author="Babepedia",
             text=html_content
         )
@@ -96,7 +96,7 @@ async def search_and_scrape_babepedia(
     else:
         data["aka"] = "N/A"
 
-    # --- ACCURATE RATING & VOTES EXTRACTION ---
+    # Rating & Votes Extraction
     rating_str = "N/A"
     votes_str = "N/A"
 
@@ -163,28 +163,23 @@ async def search_and_scrape_babepedia(
         main_img = soup.find("img", id="bioimg")
         data["photo"] = safe_urljoin(BABEPEDIA_BASE, main_img.get("src", "")) if main_img else None
 
-    # --- NO THUMBNAILS: HQ PROFILE IMAGES FIRST -> USER UPLOADS SECOND ---
+    # Full-Res Gallery Image Extraction
     gallery_imgs = []
+    img_elements = soup.select("#profbox2 a.img img, .useruploads2 a.img img")
 
-    # 1. Fetch main high-quality profile gallery images first (#profbox2)
-    for a_tag in soup.select("#profbox2 a.img[href]"):
-        href = a_tag.get("href", "")
-        if href and not href.startswith("/uploadphotos/"):
-            full_url = safe_urljoin(BABEPEDIA_BASE, href)
-            if full_url not in gallery_imgs:
-                gallery_imgs.append(full_url)
+    for img_tag in img_elements:
+        src = img_tag.get("src", "") or img_tag.get("data-src", "")
+        if not src:
+            continue
 
-    # 2. Append full-resolution user uploads second (.useruploads2)
-    user_uploads_container = soup.select_one(".useruploads2")
-    if user_uploads_container:
-        for a_tag in user_uploads_container.select("a.img[href]"):
-            href = a_tag.get("href", "")
-            if href and not href.startswith("/uploadphotos/"):
-                full_url = safe_urljoin(BABEPEDIA_BASE, href)
-                if full_url not in gallery_imgs:
-                    gallery_imgs.append(full_url)
+        # Convert thumbnail paths to full-resolution direct image URLs
+        full_img_src = src.replace("/thumbs/", "/").replace("/thumb_", "/")
+        full_url = safe_urljoin(BABEPEDIA_BASE, full_img_src)
 
-    # 3. Fallback to main profile picture if no gallery exists
+        if full_url not in gallery_imgs:
+            gallery_imgs.append(full_url)
+
+    # Fallback to main profile picture if no gallery exists
     if not gallery_imgs and data.get("photo"):
         gallery_imgs.append(data["photo"])
 
