@@ -241,9 +241,9 @@ async def babe_handler(client: Client, message: Message):
         "age": "🎂", "born": "📍", "years_active": "🎬", "birthplace": "🌍",
         "nationality": "🏳️", "ethnicity": "👤", "professions": "💼", "sexuality": "💕",
         "hair_color": "💇", "eye_color": "👁️", "height": "📏", "weight": "⚖️",
-        "body_type": "🔰", "measurements": "📐", "bra_size": "👙", "boobs": "✨",
-        "tattoos": "🎨", "piercings": "💎", "solo": "🎭", "girl_girl": "👯",
-        "boy_girl": "💑", "special": "⚡"
+        "body_type": "🔰", "measurements": "📐", "bra/cup_size": "👙", "boobs": "✨",
+        "tattoos": "🎨", "piercings": "💎", "solo": "🎭", "girl/girl": "👯",
+        "boy/girl": "💑", "special": "⚡"
     }
     
     caption = (
@@ -267,14 +267,14 @@ async def babe_handler(client: Client, message: Message):
         f"{emoji_map['weight']} Weight: {data['weight']}\n"
         f"{emoji_map['body_type']} Body Type: {data['body_type']}\n"
         f"{emoji_map['measurements']} Measurements: {data['measurements']}\n"
-        f"{emoji_map['bra_size']} Bra Size: {data['bra_size']}\n"
+        f"{emoji_map['bra/cup_size']} Bra Size: {data['bra/cup_size']}\n"
         f"{emoji_map['boobs']} Boobs: {data['boobs']}\n"
         f"{emoji_map['tattoos']} Tattoos: {data['tattoos']}\n"
         f"{emoji_map['piercings']} Piercings: {data['piercings']}\n\n"
         f"🎥 **SPECIALTIES**\n"
         f"{emoji_map['solo']} Solo: {data['solo']}\n"
-        f"{emoji_map['girl_girl']} Girl/Girl: {data['girl_girl']}\n"
-        f"{emoji_map['boy_girl']} Boy/Girl: {data['boy_girl']}\n"
+        f"{emoji_map['girl/girl']} Girl/Girl: {data['girl/girl']}\n"
+        f"{emoji_map['boy/girl']} Boy/Girl: {data['boy/girl']}\n"
         f"{emoji_map['special']} Special: {data['special']}\n"
         f"━━━━━━━━━━━━━━━━━━━━━"
     )
