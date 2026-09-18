@@ -188,3 +188,4 @@ def make_progress_bar(current: int, total: int, length: int = 10) -> str:
     bar = "█" * filled + "░" * (length - filled)
     percent = int(100 * (current / total))
     return f"[{bar}] {percent}%"
+    
