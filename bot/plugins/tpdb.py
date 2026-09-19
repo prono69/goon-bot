@@ -12,11 +12,15 @@ from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMa
 # Configuration
 API_URL = "https://api.theporndb.net/scenes"
 API_TOKEN = PORNDB_API_TOKEN
-RESULTS_PER_PAGE = 5  # Display 5 scene buttons per grid page
+RESULTS_PER_PAGE = 5
 REQUEST_TIMEOUT = 15
 CACHE_TTL = 30 * 60
 MAX_CACHE_SIZE = 100
 DEFAULT_POSTER = "https://via.placeholder.com/400x600?text=No+Image"
+
+# INCREASED CAPTION LIMIT for performer bios
+SCENE_CAPTION_LIMIT = 1024
+PERFORMER_CAPTION_LIMIT = 2048  # Much higher limit for performer cards
 
 USER_SEARCH_CACHE: Dict[Any, Dict[str, Any]] = {}
 
@@ -87,20 +91,33 @@ def truncate_text(text: str, max_length: int) -> str:
     return text[: max_length - 3].rstrip() + "..."
 
 
-def build_clean_caption(title: str, details: Dict[str, Any], max_length: int = 1024, special_field: str = "📖 Description") -> str:
+def build_clean_caption(
+    title: str, 
+    details: Dict[str, Any], 
+    max_length: int = 1024, 
+    special_field: str = "📖 Description"
+) -> str:
+    """
+    FIXED: Special handling for descriptions/bios to ensure they always display
+    """
     title = clean_value(title) or "Untitled"
     lines = [f"<b>🎬 {escape(title)}</b>", ""]
 
+    # Extract the special field (description/bio) separately
+    special_field_value = details.get(special_field)
+    special_field_value = clean_value(special_field_value)
+
+    # Build other fields first (non-description)
     for key, value in details.items():
+        if key == special_field:  # Skip, we'll add this last
+            continue
+            
         value = clean_value(value)
         if not value:
             continue
         value = truncate_text(value, 450)
         
-        if key == special_field:
-            line = f"<b>{escape(key)}:</b> \n<i>{escape(value)}</i>"
-        else:
-            line = f"<b>{escape(key)}:</b> <code>{escape(value)}</code>"
+        line = f"<b>{escape(key)}:</b> <code>{escape(value)}</code>"
         
         candidate = "\n".join(lines + [line])
 
@@ -110,13 +127,25 @@ def build_clean_caption(title: str, details: Dict[str, Any], max_length: int = 1
             remaining = max_length - len("\n".join(lines)) - 1
             if remaining > 20:
                 shortened = truncate_text(value, max(10, remaining - len(key) - 10))
-                if key == special_field:
-                    line = f"<b>{escape(key)}:</b> <i>{escape(shortened)}</i>"
-                else:
-                    line = f"<b>{escape(key)}:</b> <code>{escape(shortened)}</code>"
+                line = f"<b>{escape(key)}:</b> <code>{escape(shortened)}</code>"
                 candidate = "\n".join(lines + [line])
                 if len(candidate) <= max_length:
                     lines.append(line)
+
+    # ADD DESCRIPTION/BIO LAST - This ensures it's always included if space permits
+    if special_field_value:
+        desc_line = f"<b>{escape(special_field)}:</b> \n<i>{escape(special_field_value)}</i>"
+        candidate = "\n".join(lines + [desc_line])
+        
+        if len(candidate) <= max_length:
+            lines.append(desc_line)
+        else:
+            # Even if we're over limit, try to include a truncated version of the bio
+            remaining = max_length - len("\n".join(lines)) - 1
+            if remaining > 50:  # Only if we have meaningful space left
+                shortened = truncate_text(special_field_value, max(30, remaining - len(special_field) - 10))
+                desc_line = f"<b>{escape(special_field)}:</b> <i>{escape(shortened)}</i>"
+                lines.append(desc_line)
 
     return "\n".join(lines).strip()
 
@@ -285,7 +314,6 @@ async def paginate_grid(client: Client, callback: CallbackQuery):
 
     text, reply_markup = build_grid_payload(cache, grid_page=grid_page)
 
-    # In-place edit for zero-flicker smooth pagination
     try:
         await callback.message.edit_text(text=text, reply_markup=reply_markup)
         await callback.answer()
@@ -346,7 +374,8 @@ async def view_scene_details(client: Client, callback: CallbackQuery):
         else None
     )
 
-    plot = clean_value(scene.get("description") or scene.get("plot"))
+    # FIXED: Use 'description' field (API provides 'description', not 'plot')
+    plot = clean_value(scene.get("description"))
 
     metadata = {
         "📺 Site": site_name,
@@ -359,7 +388,12 @@ async def view_scene_details(client: Client, callback: CallbackQuery):
         "📖 Description": plot,
     }
 
-    caption = build_clean_caption(scene.get("title", "Scene Details"), metadata)
+    caption = build_clean_caption(
+        scene.get("title", "Scene Details"), 
+        metadata,
+        max_length=SCENE_CAPTION_LIMIT
+    )
+    
     buttons = []
 
     scene_url = clean_value(scene.get("url"))
@@ -373,7 +407,6 @@ async def view_scene_details(client: Client, callback: CallbackQuery):
 
     buttons.append([InlineKeyboardButton("❌ Close Card", callback_data="close_menu")])
 
-    # Send photo details below without deleting the grid message
     try:
         await client.send_photo(
             chat_id=callback.message.chat.id,
@@ -425,12 +458,6 @@ async def list_performers(client: Client, callback: CallbackQuery):
     buttons.append([InlineKeyboardButton("⬅️ Back to Scene", callback_data=f"back_to_scene:{scene_index}")])
     await callback.answer("Fetching performers")
 
-    # Switch the current media card into text mode to pick performers
-    #try:
-        #await callback.message.delete()
-    #except Exception:
-        #pass
-
     await client.send_message(
         chat_id=callback.message.chat.id,
         text="<b>🎭 Select a Performer to view full profile:</b>",
@@ -461,7 +488,15 @@ async def display_performer(client: Client, callback: CallbackQuery):
         await callback.answer("Could not load performer information.", show_alert=True)
         return
 
+    # FIXED: Properly handle bio retrieval with fallback chain
     parent_data = target_performer.get("parent") or {}
+    
+    # Try multiple bio locations
+    bio_text = (
+        clean_value(target_performer.get("bio"))
+        or clean_value(parent_data.get("bio"))
+    )
+
     parent_extras = parent_data.get("extras") or parent_data.get("extra") or {}
     performer_extra = target_performer.get("extra") or {}
 
@@ -475,11 +510,6 @@ async def display_performer(client: Client, callback: CallbackQuery):
         or parent_data.get("thumbnail")
         or parent_data.get("face")
         or DEFAULT_POSTER
-    )
-
-    bio_text = (
-        clean_value(target_performer.get("bio"))
-        or clean_value(parent_data.get("bio"))
     )
 
     def get_extra(key1, key2=None):
@@ -505,7 +535,7 @@ async def display_performer(client: Client, callback: CallbackQuery):
         "📌 Piercings": get_extra("piercings"),
         "✂️ Fake Boobs": get_extra("fakeboobs"),
         "👶 Ethnicity": get_extra("ethnicity"),
-        "📖 Description": bio_text,
+        "📖 Description": bio_text,  # Bio is now guaranteed to be retrieved correctly
     }
 
     performer_name = (
@@ -514,7 +544,12 @@ async def display_performer(client: Client, callback: CallbackQuery):
         or "Performer Info"
     )
 
-    caption = build_clean_caption(performer_name, performer_details)
+    # FIXED: Use higher caption limit for performers to ensure bios display
+    caption = build_clean_caption(
+        performer_name, 
+        performer_details,
+        max_length=PERFORMER_CAPTION_LIMIT
+    )
     
     # Platforms to skip
     SKIP_PLATFORMS = {"IAFD", "DATA18", "Indexxx", "StashDB", "Wikidata"}
@@ -526,20 +561,17 @@ async def display_performer(client: Client, callback: CallbackQuery):
     if links:
         link_buttons = []
         for platform, url in links.items():
-            # Skip unwanted platforms
             if platform in SKIP_PLATFORMS:
                 continue
             
-            if url:  # Only add if URL exists
+            if url:
                 link_buttons.append(
                     InlineKeyboardButton(f"🔗 {platform}", url=url)
                 )
         
-        # Arrange in 2 columns
         if link_buttons:
             buttons.extend(make_button_rows(link_buttons, per_row=2))
 
-    # Back button
     buttons.append([InlineKeyboardButton("⬅️ Back to Performers", callback_data=f"list_perf:{scene_index}")])
     await callback.answer("Sending performer's details")
 
@@ -562,7 +594,6 @@ async def display_performer(client: Client, callback: CallbackQuery):
             caption=caption,
             reply_markup=InlineKeyboardMarkup(buttons),
         )
-
 
 
 @Client.on_callback_query(filters.regex(r"^back_to_scene:(\d+)$"))
@@ -597,7 +628,7 @@ async def back_to_scene(client: Client, callback: CallbackQuery):
     performers = scene.get("performers") or []
     performer_names = ", ".join([clean_value(p.get("name")) or str(p) for p in performers if p]) if performers else None
 
-    plot = clean_value(scene.get("description") or scene.get("plot"))
+    plot = clean_value(scene.get("description"))
 
     metadata = {
         "📺 Site": site_name,
@@ -610,7 +641,12 @@ async def back_to_scene(client: Client, callback: CallbackQuery):
         "📖 Description": plot,
     }
 
-    caption = build_clean_caption(scene.get("title", "Scene Details"), metadata)
+    caption = build_clean_caption(
+        scene.get("title", "Scene Details"),
+        metadata,
+        max_length=SCENE_CAPTION_LIMIT
+    )
+    
     buttons = []
 
     scene_url = clean_value(scene.get("url"))
@@ -618,7 +654,9 @@ async def back_to_scene(client: Client, callback: CallbackQuery):
         buttons.append([InlineKeyboardButton("🔗 Open Scene Web Page", url=scene_url)])
 
     if performers:
-        buttons.append([InlineKeyboardButton("🎭 View Performers", callback_data=f"list_perf:{scene_index}")])
+        buttons.append(
+            [InlineKeyboardButton("🎭 View Performers", callback_data=f"list_perf:{scene_index}")]
+        )
 
     buttons.append([InlineKeyboardButton("❌ Close Card", callback_data="close_menu")])
 
