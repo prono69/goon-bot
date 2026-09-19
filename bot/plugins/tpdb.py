@@ -232,6 +232,10 @@ async def display_search_results(
         await status.edit_text("❌ Session expired.")
         return
 
+    # Update cache with current page
+    cache["page"] = page
+    save_cache(cache_key, cache)
+
     first_scene = page_scenes[0]
     title = clean_value(first_scene.get("title")) or "Unknown Scene"
     poster = (
@@ -274,11 +278,14 @@ async def display_search_results(
 
     caption = build_clean_caption(title, metadata)
     buttons = []
-    next_button_text = (
-        "Next 📍" if page < len(scenes) // PER_PAGE + 1 else "Last Page"
-    )
-
-    buttons.append([InlineKeyboardButton(next_button_text, callback_data=f"page:{page+1}")])
+    
+    # Calculate total pages correctly
+    total_pages = (len(scenes) + PER_PAGE - 1) // PER_PAGE
+    
+    # Only show Next button if there are more pages
+    if page < total_pages:
+        buttons.append([InlineKeyboardButton("Next 📍", callback_data=f"page:{page+1}")])
+    
     buttons.append([InlineKeyboardButton("📋 Scene Details", callback_data=f"show_sc:{first_scene.get('id')}")])
     buttons.append([InlineKeyboardButton("⛔ Close", callback_data="noop")])
 
@@ -297,33 +304,41 @@ async def display_search_results(
 
 @Client.on_callback_query(filters.regex(r"^page:(\d+)$"))
 async def paginate_results(client: Client, callback: CallbackQuery):
-    await callback.answer()
-    page = int(callback.data.split(":")[1])
-    cache_key = get_cache_key(callback)
-    cache = get_cache(cache_key)
-
-    if not cache:
-        await callback.answer("Session expired. Please search again.", show_alert=True)
-        return
-
-    scenes = cache.get("scenes", [])
-    total_pages = (len(scenes) + PER_PAGE - 1) // PER_PAGE
-
-    if page < 1 or page > total_pages:
-        await callback.answer("Invalid page.", show_alert=True)
-        return
-
     try:
-        await callback.message.delete()
-    except Exception:
-        pass
+        page = int(callback.data.split(":")[1])
+        cache_key = get_cache_key(callback)
+        cache = get_cache(cache_key)
 
-    temp_status = await client.send_message(
-        chat_id=callback.message.chat.id, text="⏳ <i>Loading...</i>"
-    )
-    await display_search_results(
-        client, callback.message, temp_status, cache_key, scenes, page
-    )
+        if not cache:
+            await callback.answer("Session expired. Please search again.", show_alert=True)
+            return
+
+        scenes = cache.get("scenes", [])
+        total_pages = (len(scenes) + PER_PAGE - 1) // PER_PAGE
+
+        if page < 1 or page > total_pages:
+            await callback.answer(f"Invalid page. (Max: {total_pages})", show_alert=True)
+            return
+
+        await callback.answer()  # Acknowledge the button click
+
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+
+        temp_status = await client.send_message(
+            chat_id=callback.message.chat.id, text="⏳ <i>Loading...</i>"
+        )
+        await display_search_results(
+            client, callback.message, temp_status, cache_key, scenes, page
+        )
+    except Exception as e:
+        print(f"Error in paginate_results: {e}")
+        try:
+            await callback.answer(f"Error: {str(e)[:50]}", show_alert=True)
+        except:
+            pass
 
 
 @Client.on_callback_query(filters.regex(r"^show_sc:(.+)$"))
