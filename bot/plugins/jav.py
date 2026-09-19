@@ -1,106 +1,105 @@
+import hashlib
+import json
+import time
 from pyrogram import Client, filters
-from pyrogram.types import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Message,
-)
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from bot.utils.javdatabase import (
-    get_movie_details,
-    search_movies,
-)
+from bot.utils.javdatabase import get_movie_details, search_movies
 
 
 # ============================================================
-# BUTTON HELPER
+# RESULT CACHE (stores search results temporarily)
 # ============================================================
 
-def make_button_rows(
-    buttons,
-    per_row=2,
-):
-    """Put buttons into rows."""
+_RESULT_CACHE = {}
+_CACHE_TIMEOUT = 3600  # 1 hour
 
-    return [
-        buttons[i:i + per_row]
-        for i in range(
-            0,
-            len(buttons),
-            per_row,
-        )
-    ]
+
+def _cache_key(user_id: int, query: str) -> str:
+    """Generate a cache key from user ID and query."""
+    return hashlib.md5(f"{user_id}:{query}".encode()).hexdigest()
+
+
+def _cache_results(user_id: int, query: str, results: list) -> str:
+    """Cache results and return cache key."""
+    key = _cache_key(user_id, query)
+    _RESULT_CACHE[key] = {
+        "results": results,
+        "timestamp": time.time(),
+    }
+    return key
+
+
+def _get_cached_results(key: str) -> list:
+    """Retrieve cached results if not expired."""
+    if key not in _RESULT_CACHE:
+        return None
+    
+    cache_entry = _RESULT_CACHE[key]
+    if time.time() - cache_entry["timestamp"] > _CACHE_TIMEOUT:
+        del _RESULT_CACHE[key]
+        return None
+    
+    return cache_entry["results"]
+
+
+def _get_result_from_cache(cache_key: str, index: int):
+    """Get a specific result from cache by index."""
+    results = _get_cached_results(cache_key)
+    if results and 0 <= index < len(results):
+        return results[index]
+    return None
 
 
 # ============================================================
-# FORMAT MOVIE
+# FORMATTING
 # ============================================================
 
-def format_movie(movie):
-    """Create the Telegram caption."""
+def _make_button_rows(buttons, per_row=2):
+    """Arrange buttons into rows."""
+    return [buttons[i:i + per_row] for i in range(0, len(buttons), per_row)]
 
-    title = movie.get("title") or "Unknown"
 
-    dvd_id = movie.get("dvd_id") or "N/A"
-    content_id = movie.get("content_id") or "N/A"
-    release_date = movie.get("release_date") or "N/A"
-    runtime = movie.get("runtime") or "N/A"
-    studio = movie.get("studio") or "N/A"
-    director = movie.get("director") or "N/A"
-    series = movie.get("series") or "N/A"
-
+def _format_movie(movie: dict) -> str:
+    """Format movie data into Telegram caption."""
+    
+    fields = {
+        "🆔 DVD ID": movie.get("dvd_id") or "N/A",
+        "🔖 Content ID": movie.get("content_id") or "N/A",
+        "📅 Release Date": movie.get("release_date") or "N/A",
+        "⏱ Runtime": movie.get("runtime") or "N/A",
+        "🏢 Studio": movie.get("studio") or "N/A",
+        "🎬 Director": movie.get("director") or "N/A",
+        "📚 Series": movie.get("series") or "N/A",
+    }
+    
+    text = f"<b>🎬 {movie.get('title') or 'Unknown'}</b>\n\n"
+    text += "\n".join(f"<b>{k}:</b> <code>{v}</code>" if "ID" in k else f"<b>{k}:</b> {v}" 
+                      for k, v in fields.items())
+    
     genres = movie.get("genres") or []
-    actresses = movie.get("actresses") or []
-
-    text = (
-        f"<b>🎬 {title}</b>\n\n"
-        f"<b>🆔 DVD ID:</b> <code>{dvd_id}</code>\n"
-        f"<b>🔖 Content ID:</b> <code>{content_id}</code>\n"
-        f"<b>📅 Release Date:</b> {release_date}\n"
-        f"<b>⏱ Runtime:</b> {runtime}\n"
-        f"<b>🏢 Studio:</b> {studio}\n"
-        f"<b>🎬 Director:</b> {director}\n"
-        f"<b>📚 Series:</b> {series}\n"
-    )
-
     if genres:
-        text += (
-            "\n<b>🏷 Genres:</b> "
-            + ", ".join(genres)
-        )
-
+        text += f"\n\n<b>🏷 Genres:</b> {', '.join(genres)}"
+    
+    actresses = movie.get("actresses") or []
     if actresses:
-        text += (
-            "\n\n<b>👤 Actresses:</b> "
-            + ", ".join(actresses)
-        )
-
+        text += f"\n\n<b>👤 Actresses:</b> {', '.join(actresses)}"
+    
     plot = movie.get("plot")
-
     if plot:
-        # Keep Telegram messages manageable.
         if len(plot) > 1500:
             plot = plot[:1500].rstrip() + "..."
-
-        text += (
-            f"\n\n<b>📝 Plot:</b>\n{plot}"
-        )
-
+        text += f"\n\n<b>📝 Plot:</b>\n{plot}"
+    
     return text
 
 
 # ============================================================
-# /JAV
+# COMMAND: /jav
 # ============================================================
 
 @Client.on_message(filters.command("jav"))
-async def jav_handler(
-    client: Client,
-    message: Message,
-):
-    # --------------------------------------------------------
-    # Check query
-    # --------------------------------------------------------
-
+async def jav_handler(client: Client, message: Message):
     if len(message.command) < 2:
         await message.reply_text(
             "❌ <b>Usage:</b>\n\n"
@@ -109,227 +108,127 @@ async def jav_handler(
         )
         return
 
-    query = " ".join(
-        message.command[1:]
-    ).strip()
-
-    status = await message.reply_text(
-        "🔎 <b>Searching JAVDatabase...</b>"
-    )
-
-    # --------------------------------------------------------
-    # Search
-    # --------------------------------------------------------
+    query = " ".join(message.command[1:]).strip()
+    status = await message.reply_text("🔎 <b>Searching JAVDatabase...</b>")
 
     try:
         results = search_movies(query)
-
     except Exception as exc:
         await status.edit_text(
-            "❌ <b>Search failed.</b>\n\n"
-            f"<code>{type(exc).__name__}: {exc}</code>"
+            f"❌ <b>Search failed.</b>\n\n<code>{type(exc).__name__}: {exc}</code>"
         )
         return
 
     if not results:
-        await status.edit_text(
-            "❌ <b>No results found.</b>\n\n"
-            f"Query: <code>{query}</code>"
-        )
+        await status.edit_text(f"❌ <b>No results found.</b>\n\nQuery: <code>{query}</code>")
         return
 
-    # --------------------------------------------------------
-    # If only one result, directly show details
-    # --------------------------------------------------------
-
+    # Single result: show details directly
     if len(results) == 1:
-        result = results[0]
+        await _show_movie_details(client, status, results[0])
+        return
 
-        await status.edit_text(
-            "📖 <b>Fetching movie details...</b>"
+    # Multiple results: show selection buttons
+    await _show_results_list(client, status, message, results, query)
+
+
+async def _show_movie_details(client: Client, status: Message, result: dict):
+    """Fetch and display movie details."""
+    await status.edit_text("📖 <b>Fetching movie details...</b>")
+    
+    try:
+        movie = get_movie_details(result["link"])
+    except Exception:
+        movie = None
+
+    if not movie:
+        await status.edit_text("❌ <b>Unable to fetch movie details.</b>")
+        return
+
+    caption = _format_movie(movie)
+    keyboard = None
+    
+    if movie.get("link"):
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🌐 JAVDatabase", url=movie["link"])]]
         )
 
-        movie = get_movie_details(
-            result["link"]
-        )
-
-        if not movie:
-            await status.edit_text(
-                "❌ <b>Unable to fetch movie details.</b>"
+    poster = movie.get("poster_url")
+    if poster:
+        try:
+            await status.delete()
+            await client.send_photo(
+                chat_id=status.chat.id,
+                photo=poster,
+                caption=caption,
+                reply_to_message_id=status.reply_to_message_id,
+                reply_markup=keyboard,
             )
             return
+        except Exception:
+            pass
 
-        caption = format_movie(movie)
+    await status.edit_text(caption, reply_markup=keyboard, disable_web_page_preview=True)
 
-        buttons = []
 
-        if movie.get("link"):
-            buttons.append(
-                InlineKeyboardButton(
-                    "🌐 JAVDatabase",
-                    url=movie["link"],
-                )
-            )
-
-        keyboard = (
-            InlineKeyboardMarkup(
-                make_button_rows(
-                    buttons,
-                    per_row=2,
-                )
-            )
-            if buttons
-            else None
-        )
-
-        poster = movie.get("poster_url")
-
-        if poster:
-            try:
-                await status.delete()
-
-                await client.send_photo(
-                    chat_id=message.chat.id,
-                    photo=poster,
-                    caption=caption,
-                    reply_to_message_id=message.id,
-                    reply_markup=keyboard,
-                )
-
-                return
-
-            except Exception:
-                # Poster may be inaccessible to Telegram.
-                pass
-
-        await status.edit_text(
-            caption,
-            reply_markup=keyboard,
-            disable_web_page_preview=True,
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # Multiple results
-    # --------------------------------------------------------
-
+async def _show_results_list(client: Client, status: Message, message: Message, results: list, query: str):
+    """Display search results as buttons."""
+    cache_key = _cache_results(message.from_user.id, query, results)
     buttons = []
 
-    for index, result in enumerate(
-        results[:10],
-        start=1,
-    ):
+    for index, result in enumerate(results[:10], start=1):
         code = result.get("code") or "Unknown"
-        title = result.get("title") or code
-
-        # Keep button text short.
-        if len(title) > 35:
-            title = title[:32] + "..."
-
-        buttons.append(
-            InlineKeyboardButton(
-                f"{index}. {code} — {title}",
-                callback_data=f"javresult:{index - 1}",
-            )
-        )
-
-    # Store results on the message object isn't reliable
-    # across workers, so use encoded callback data containing
-    # the actual URL.
-    #
-    # Rebuild the buttons with URL callbacks instead.
-    buttons = []
-
-    for index, result in enumerate(
-        results[:10],
-        start=1,
-    ):
-        code = result.get("code") or "Unknown"
-
         buttons.append(
             InlineKeyboardButton(
                 f"{index}. {code}",
-                callback_data=(
-                    f"javopen:{result['link']}"
-                ),
+                callback_data=f"javopen:{cache_key}:{index - 1}",  # Compact callback data
             )
         )
 
-    keyboard = InlineKeyboardMarkup(
-        make_button_rows(
-            buttons,
-            per_row=2,
-        )
-    )
+    keyboard = InlineKeyboardMarkup(_make_button_rows(buttons, per_row=2))
+    text = f"🔎 <b>Found {len(results)} results</b>\n\nSelect a movie:"
 
-    text = (
-        f"🔎 <b>Found {len(results)} results</b>\n\n"
-        "Select a movie:"
-    )
-
-    await status.edit_text(
-        text,
-        reply_markup=keyboard,
-    )
+    await status.edit_text(text, reply_markup=keyboard)
 
 
 # ============================================================
-# CALLBACK — OPEN MOVIE
+# CALLBACK: OPEN MOVIE
 # ============================================================
 
-@Client.on_callback_query(
-    filters.regex(r"^javopen:")
-)
-async def jav_open_callback(
-    client,
-    callback_query,
-):
-    url = callback_query.data[
-        len("javopen:"):
-    ]
-
-    await callback_query.answer(
-        "Fetching movie details..."
-    )
-
+@Client.on_callback_query(filters.regex(r"^javopen:"))
+async def jav_open_callback(client: Client, callback_query):
     try:
-        movie = get_movie_details(url)
-
-    except Exception:
-        movie = {}
-
-    if not movie:
-        await callback_query.message.reply_text(
-            "❌ Unable to fetch movie details."
-        )
+        _, cache_key, index = callback_query.data.split(":")
+        index = int(index)
+    except (ValueError, IndexError):
+        await callback_query.answer("❌ Invalid callback data", show_alert=True)
         return
 
-    caption = format_movie(movie)
+    await callback_query.answer("Fetching movie details...")
 
-    buttons = []
+    result = _get_result_from_cache(cache_key, index)
+    if not result:
+        await callback_query.message.reply_text("❌ Cache expired. Please search again.")
+        return
 
+    try:
+        movie = get_movie_details(result["link"])
+    except Exception:
+        movie = None
+
+    if not movie:
+        await callback_query.message.reply_text("❌ Unable to fetch movie details.")
+        return
+
+    caption = _format_movie(movie)
+    keyboard = None
+    
     if movie.get("link"):
-        buttons.append(
-            InlineKeyboardButton(
-                "🌐 JAVDatabase",
-                url=movie["link"],
-            )
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🌐 JAVDatabase", url=movie["link"])]]
         )
-
-    keyboard = (
-        InlineKeyboardMarkup(
-            make_button_rows(
-                buttons,
-                per_row=2,
-            )
-        )
-        if buttons
-        else None
-    )
 
     poster = movie.get("poster_url")
-
     if poster:
         try:
             await callback_query.message.reply_photo(
@@ -338,7 +237,6 @@ async def jav_open_callback(
                 reply_markup=keyboard,
             )
             return
-
         except Exception:
             pass
 
