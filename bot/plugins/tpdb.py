@@ -20,7 +20,7 @@ DEFAULT_POSTER = "https://via.placeholder.com/400x600?text=No+Image"
 
 # INCREASED CAPTION LIMIT for performer bios
 SCENE_CAPTION_LIMIT = 1024
-PERFORMER_CAPTION_LIMIT = 2048  # Much higher limit for performer cards
+PERFORMER_CAPTION_LIMIT = 1024  # Much higher limit for performer cards
 
 USER_SEARCH_CACHE: Dict[Any, Dict[str, Any]] = {}
 
