@@ -430,8 +430,16 @@ async def display_performer(client: Client, callback: CallbackQuery):
         return
 
     parent_data = target_performer.get("parent") or {}
-    extras = {**(parent_data.get("extras") or {}), **(target_performer.get("extra") or {})}
+    
+    # Merge extras from multiple sources, with proper prioritization
+    # Priority: parent.extras > parent.extra > performer.extra
+    parent_extras = parent_data.get("extras") or parent_data.get("extra") or {}
+    performer_extra = target_performer.get("extra") or {}
+    
+    # Merge with parent_extras taking priority (it's more complete)
+    extras = {**performer_extra, **parent_extras}
 
+    # Get photo from multiple sources
     photo = (
         target_performer.get("image")
         or target_performer.get("thumbnail")
@@ -445,20 +453,35 @@ async def display_performer(client: Client, callback: CallbackQuery):
         await callback.answer("No performer photo available.", show_alert=True)
         return
 
-    bio_text = target_performer.get("bio") or parent_data.get("bio")
+    # Get biography from multiple sources
+    bio_text = (
+        clean_value(target_performer.get("bio"))
+        or clean_value(parent_data.get("bio"))
+    )
+
+    # Helper function to safely get extras with multiple key options
+    def get_extra(key1, key2=None):
+        value = extras.get(key1)
+        if not value and key2:
+            value = extras.get(key2)
+        return value
 
     performer_details = {
-        "⚧ Gender": extras.get("gender"),
-        "🎂 Birthday": extras.get("birthday"),
-        "📍 Birthplace": extras.get("birthplace"),
-        "🌐 Nationality": extras.get("nationality"),
-        "📏 Height": extras.get("height"),
-        "⚖️ Weight": extras.get("weight"),
-        "📐 Measurements": extras.get("measurements"),
-        "☕ Cup Size": extras.get("cupsize"),
-        "👁 Eye Color": extras.get("eye_colour") or extras.get("eye_color"),
-        "💇 Hair Color": extras.get("haircolor") or extras.get("hair_colour"),
-        "✨ Astrology": extras.get("astrology"),
+        "⚧ Gender": get_extra("gender"),
+        "🎂 Birthday": get_extra("birthday"),
+        "📍 Birthplace": get_extra("birthplace"),
+        "🌐 Nationality": get_extra("nationality"),
+        "📏 Height": get_extra("height"),
+        "⚖️ Weight": get_extra("weight"),
+        "📐 Measurements": get_extra("measurements"),
+        "☕ Cup Size": get_extra("cupsize"),
+        "👁 Eye Color": get_extra("eye_colour", "eye_color"),
+        "💇 Hair Color": get_extra("haircolor", "hair_colour"),
+        "✨ Astrology": get_extra("astrology"),
+        "💪 Tattooos": get_extra("tattoos"),
+        "📌 Piercings": get_extra("piercings"),
+        "✂️ Fake Boobs": get_extra("fakeboobs"),
+        "👶 Ethnicity": get_extra("ethnicity"),
         "📖 Biography": bio_text,
     }
 
