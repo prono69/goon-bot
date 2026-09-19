@@ -98,7 +98,7 @@ def build_clean_caption(title: str, details: Dict[str, Any], max_length: int = 1
         value = truncate_text(value, 450)
         
         if key == special_field:
-            line = f"<b>{escape(key)}:</b> <i>{escape(value)}</i>"
+            line = f"<b>{escape(key)}:</b> \n<i>{escape(value)}</i>"
         else:
             line = f"<b>{escape(key)}:</b> <code>{escape(value)}</code>"
         
@@ -239,7 +239,7 @@ async def fetch_scenes(query: str, page: int = 1) -> Optional[Dict[str, Any]]:
         return None
 
 
-@Client.on_message(filters.command(["search", "pdb"]) & filters.text)
+@Client.on_message(filters.command("pdb") & filters.text)
 async def search_scenes(client: Client, message: Message):
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2 or not parts[1].strip():
@@ -392,7 +392,7 @@ async def view_scene_details(client: Client, callback: CallbackQuery):
 
 @Client.on_callback_query(filters.regex(r"^list_perf:(\d+)$"))
 async def list_performers(client: Client, callback: CallbackQuery):
-    await callback.answer()
+    await callback.answer("ok")
     scene_index = int(callback.data.split(":")[1])
     cache_key = get_cache_key(callback)
     cache = get_cache(cache_key)
@@ -490,6 +490,7 @@ async def display_performer(client: Client, callback: CallbackQuery):
 
     performer_details = {
         "⚧ Gender": get_extra("gender"),
+        "⭐ Rating": clean_value(parent_data.get("rating")),
         "🎂 Birthday": get_extra("birthday"),
         "📍 Birthplace": get_extra("birthplace"),
         "🌐 Nationality": get_extra("nationality"),
@@ -504,7 +505,7 @@ async def display_performer(client: Client, callback: CallbackQuery):
         "📌 Piercings": get_extra("piercings"),
         "✂️ Fake Boobs": get_extra("fakeboobs"),
         "👶 Ethnicity": get_extra("ethnicity"),
-        "📖 Biography": bio_text,
+        "📖 Description": bio_text,
     }
 
     performer_name = (
@@ -514,7 +515,32 @@ async def display_performer(client: Client, callback: CallbackQuery):
     )
 
     caption = build_clean_caption(performer_name, performer_details)
-    buttons = [[InlineKeyboardButton("⬅️ Back to Performers", callback_data=f"list_perf:{scene_index}")]]
+    
+    # Platforms to skip
+    SKIP_PLATFORMS = {"IAFD", "DATA18", "Indexxx", "StashDB", "Wikidata"}
+
+    buttons = []
+
+    # Add social/profile links (2 per row)
+    links = parent_data.get("extras", {}).get("links", {})
+    if links:
+        link_buttons = []
+        for platform, url in links.items():
+            # Skip unwanted platforms
+            if platform in SKIP_PLATFORMS:
+                continue
+            
+            if url:  # Only add if URL exists
+                link_buttons.append(
+                    InlineKeyboardButton(f"🔗 {platform}", url=url)
+                )
+        
+        # Arrange in 2 columns
+        if link_buttons:
+            buttons.extend(make_button_rows(link_buttons, per_row=2))
+
+    # Back button
+    buttons.append([InlineKeyboardButton("⬅️ Back to Performers", callback_data=f"list_perf:{scene_index}")])
     await callback.answer("Sending performer's details")
 
     try:
@@ -536,6 +562,7 @@ async def display_performer(client: Client, callback: CallbackQuery):
             caption=caption,
             reply_markup=InlineKeyboardMarkup(buttons),
         )
+
 
 
 @Client.on_callback_query(filters.regex(r"^back_to_scene:(\d+)$"))
