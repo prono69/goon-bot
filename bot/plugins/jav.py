@@ -8,11 +8,11 @@ from bot.utils.javdatabase import get_movie_details, search_movies
 
 
 # ============================================================
-# RESULT CACHE (stores search results temporarily)
+# RESULT CACHE
 # ============================================================
 
 _RESULT_CACHE = {}
-_CACHE_TIMEOUT = 3600  # 1 hour
+_CACHE_TIMEOUT = 3600
 
 
 def _cache_key(user_id: int, query: str) -> str:
@@ -63,23 +63,20 @@ def _make_button_rows(buttons, per_row=2):
 def _format_movie(movie: dict) -> str:
     """Format movie data into Telegram caption."""
     
-    fields = {
-        "🆔 DVD ID": movie.get("dvd_id") or "N/A",
-        "🔖 Content ID": movie.get("content_id") or "N/A",
-        "📅 Release Date": movie.get("release_date") or "N/A",
-        "⏱ Runtime": movie.get("runtime") or "N/A",
-        "🏢 Studio": movie.get("studio") or "N/A",
-        "🎬 Director": movie.get("director") or "N/A",
-        "📚 Series": movie.get("series") or "N/A",
-    }
+    title = movie.get("title") or "Unknown"
     
-    text = f"<b>🎬 {movie.get('title') or 'Unknown'}</b>\n\n"
-    text += "\n".join(f"<b>{k}:</b> <code>{v}</code>" if "ID" in k else f"<b>{k}:</b> {v}" 
-                      for k, v in fields.items())
+    text = f"<b>🎬 {title}</b>\n\n"
+    text += f"<b>🆔 DVD ID:</b> <code>{movie.get('dvd_id') or 'N/A'}</code>\n"
+    text += f"<b>🔖 Content ID:</b> <code>{movie.get('content_id') or 'N/A'}</code>\n"
+    text += f"<b>📅 Release Date:</b> {movie.get('release_date') or 'N/A'}\n"
+    text += f"<b>⏱ Runtime:</b> {movie.get('runtime') or 'N/A'}\n"
+    text += f"<b>🏢 Studio:</b> {movie.get('studio') or 'N/A'}\n"
+    text += f"<b>🎬 Director:</b> {movie.get('director') or 'N/A'}\n"
+    text += f"<b>📚 Series:</b> {movie.get('series') or 'N/A'}\n"
     
     genres = movie.get("genres") or []
     if genres:
-        text += f"\n\n<b>🏷 Genres:</b> {', '.join(genres)}"
+        text += f"\n<b>🏷 Genres:</b> {', '.join(genres)}"
     
     actresses = movie.get("actresses") or []
     if actresses:
@@ -95,7 +92,7 @@ def _format_movie(movie: dict) -> str:
 
 
 # ============================================================
-# COMMAND: /jav
+# /JAV HANDLER
 # ============================================================
 
 @Client.on_message(filters.command("jav"))
@@ -123,56 +120,55 @@ async def jav_handler(client: Client, message: Message):
         await status.edit_text(f"❌ <b>No results found.</b>\n\nQuery: <code>{query}</code>")
         return
 
-    # Single result: show details directly
+    # Single result
     if len(results) == 1:
-        await _show_movie_details(client, status, results[0])
-        return
+        result = results[0]
+        await status.edit_text("📖 <b>Fetching movie details...</b>")
 
-    # Multiple results: show selection buttons
-    await _show_results_list(client, status, message, results, query)
-
-
-async def _show_movie_details(client: Client, status: Message, result: dict):
-    """Fetch and display movie details."""
-    await status.edit_text("📖 <b>Fetching movie details...</b>")
-    
-    try:
         movie = get_movie_details(result["link"])
-    except Exception:
-        movie = None
 
-    if not movie:
-        await status.edit_text("❌ <b>Unable to fetch movie details.</b>")
-        return
+        if not movie:
+            await status.edit_text("❌ <b>Unable to fetch movie details.</b>")
+            return
 
-    caption = _format_movie(movie)
-    keyboard = None
-    
-    if movie.get("link"):
-        keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🌐 JAVDatabase", url=movie["link"])]]
+        caption = _format_movie(movie)
+        buttons = []
+
+        if movie.get("link"):
+            buttons.append(
+                InlineKeyboardButton("🌐 JAVDatabase", url=movie["link"])
+            )
+
+        keyboard = (
+            InlineKeyboardMarkup(_make_button_rows(buttons, per_row=2))
+            if buttons
+            else None
         )
 
-    poster = movie.get("poster_url")
-    if poster:
-        try:
-            await status.delete()
-            await client.send_photo(
-                chat_id=status.chat.id,
-                photo=poster,
-                caption=caption,
-                reply_to_message_id=status.reply_to_message_id,
-                reply_markup=keyboard,
-            )
-            return
-        except Exception:
-            pass
+        poster = movie.get("poster_url")
 
-    await status.edit_text(caption, reply_markup=keyboard, disable_web_page_preview=True)
+        if poster:
+            try:
+                await status.delete()
+                await client.send_photo(
+                    chat_id=message.chat.id,
+                    photo=poster,
+                    caption=caption,
+                    reply_to_message_id=message.id,
+                    reply_markup=keyboard,
+                )
+                return
+            except Exception:
+                pass
 
+        await status.edit_text(
+            caption,
+            reply_markup=keyboard,
+            disable_web_page_preview=True,
+        )
+        return
 
-async def _show_results_list(client: Client, status: Message, message: Message, results: list, query: str):
-    """Display search results as buttons."""
+    # Multiple results - cache them and create buttons
     cache_key = _cache_results(message.from_user.id, query, results)
     buttons = []
 
@@ -181,7 +177,7 @@ async def _show_results_list(client: Client, status: Message, message: Message, 
         buttons.append(
             InlineKeyboardButton(
                 f"{index}. {code}",
-                callback_data=f"javopen:{cache_key}:{index - 1}",  # Compact callback data
+                callback_data=f"javopen:{cache_key}:{index - 1}",
             )
         )
 
@@ -211,24 +207,28 @@ async def jav_open_callback(client: Client, callback_query):
         await callback_query.message.reply_text("❌ Cache expired. Please search again.")
         return
 
-    try:
-        movie = get_movie_details(result["link"])
-    except Exception:
-        movie = None
+    movie = get_movie_details(result["link"])
 
     if not movie:
         await callback_query.message.reply_text("❌ Unable to fetch movie details.")
         return
 
     caption = _format_movie(movie)
-    keyboard = None
-    
+    buttons = []
+
     if movie.get("link"):
-        keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🌐 JAVDatabase", url=movie["link"])]]
+        buttons.append(
+            InlineKeyboardButton("🌐 JAVDatabase", url=movie["link"])
         )
 
+    keyboard = (
+        InlineKeyboardMarkup(_make_button_rows(buttons, per_row=2))
+        if buttons
+        else None
+    )
+
     poster = movie.get("poster_url")
+
     if poster:
         try:
             await callback_query.message.reply_photo(
