@@ -157,6 +157,16 @@ def get_performer_from_scene(
     return None
 
 
+def get_performer_by_index(
+    scene: Dict[str, Any], performer_index: int
+) -> Optional[Dict[str, Any]]:
+    """Get performer by list index instead of ID to keep callback data small"""
+    performers = scene.get("performers") or []
+    if 0 <= performer_index < len(performers):
+        return performers[performer_index]
+    return None
+
+
 async def fetch_scenes(query: str, page: int = 1) -> Optional[Dict[str, Any]]:
     if not API_TOKEN:
         raise RuntimeError("PORNDB_API_TOKEN environment variable is not configured.")
@@ -431,16 +441,15 @@ async def list_performers(client: Client, callback: CallbackQuery):
         await callback.answer("No performers listed for this item.", show_alert=True)
         return
 
+    # Use indices instead of IDs to keep callback data small (Telegram limit: 64 bytes)
     performer_buttons = []
-    for performer in performers:
+    for performer_index, performer in enumerate(performers):
         performer_name = clean_value(performer.get("name")) or "Unknown Performer"
-        performer_id = performer.get("id")
-        if not performer_id:
-            continue
+        # Use index-based callback instead of performer ID
         performer_buttons.append(
             InlineKeyboardButton(
                 f"👤 {truncate_text(performer_name, 30)}",
-                callback_data=f"show_perf:{scene_id}:{performer_id}",
+                callback_data=f"show_perf:{scene_id}:{performer_index}",
             )
         )
 
@@ -459,10 +468,13 @@ async def list_performers(client: Client, callback: CallbackQuery):
     )
 
 
-@Client.on_callback_query(filters.regex(r"^show_perf:(.+):(.+)$"))
+@Client.on_callback_query(filters.regex(r"^show_perf:(.+):(\d+)$"))
 async def display_performer(client: Client, callback: CallbackQuery):
     await callback.answer()
-    _, scene_id, performer_id = callback.data.split(":", 2)
+    parts = callback.data.split(":", 2)
+    scene_id = parts[1]
+    performer_index = int(parts[2])  # Now using index instead of performer ID
+    
     cache_key = get_cache_key(callback)
     cache = get_cache(cache_key)
 
@@ -475,7 +487,8 @@ async def display_performer(client: Client, callback: CallbackQuery):
         await callback.answer("Scene data is no longer available.", show_alert=True)
         return
 
-    target_performer = get_performer_from_scene(scene, performer_id)
+    # Retrieve performer by index
+    target_performer = get_performer_by_index(scene, performer_index)
     if not target_performer:
         await callback.answer("Could not load performer information.", show_alert=True)
         return
