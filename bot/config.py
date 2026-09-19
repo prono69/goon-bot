@@ -66,4 +66,4 @@ START_TXT = """<b>🪶 Kᴏɴɪᴄʜɪᴡᴀ, {}! 🪶</b>
 """
 PORNHWADB_API_KEY = os.getenv("PORNHWADB_API_KEY", "pwdb")
 NHENTAI_API_KEY = os.getenv("NHENTAI_API_KEY", "put_api_key_here")
-
+PORNDB_API_TOKEN = os.getenv("PORNDB_API_TOKEN", "tpdb")

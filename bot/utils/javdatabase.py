@@ -62,6 +62,7 @@ _PATTERN_UNWANTED_CONTENT = [
     re.compile(r"No Ratings Yet.*", re.IGNORECASE),
     re.compile(r"Loading\.{0,3}.*", re.IGNORECASE),
     re.compile(r"JAV Database only provides official, legitimate & legal links.*", re.IGNORECASE),
+    re.compile(r"\b[1-5]\s*Stars?.*", re.IGNORECASE),
 ]
 
 # Build stopping boundary out of all known metadata labels
@@ -177,6 +178,31 @@ def _extract_about(html: str) -> Optional[str]:
 
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     return "\n".join(lines) or None
+
+
+def format_runtime(runtime_str: Optional[str]) -> Optional[str]:
+    """
+    Convert a runtime string like '160 min.' or '160' into '2 hr 40 min'.
+    If runtime is under an hour, returns '45 min'.
+    """
+    if not runtime_str:
+        return None
+
+    # Extract digits from the string
+    match = re.search(r"\d+", runtime_str)
+    if not match:
+        return runtime_str
+
+    total_minutes = int(match.group(0))
+    hours = total_minutes // 60
+    minutes = total_minutes % 60
+
+    if hours > 0 and minutes > 0:
+        return f"{hours} hr {minutes} min"
+    elif hours > 0:
+        return f"{hours} hr"
+    else:
+        return f"{minutes} min"
 
 
 # ============================================================
@@ -336,7 +362,7 @@ def parse_movie_metadata(html: str) -> Dict[str, Any]:
         "DVD ID": field("DVD ID", ("DVD ID", "DVD"), 4),
         "Content ID": field("Content ID", ("Content ID",), 4),
         "Release Date": field("Release Date", ("Release Date", "Released"), 4),
-        "Runtime": field("Runtime", ("Runtime",), 8),
+        "Runtime": format_runtime(field("Runtime", ("Runtime",), 8)),
         "Studio": field("Studio", ("Studio",), 8),
         "Director": director,
         "Series": series,
