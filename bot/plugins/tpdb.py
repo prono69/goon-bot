@@ -11,7 +11,7 @@ from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMa
 # Configuration
 API_URL = "https://api.theporndb.net/scenes"
 API_TOKEN = PORNDB_API_TOKEN
-PER_PAGE = 5
+RESULTS_PER_PAGE = 10  # Show 10 results per grid
 REQUEST_TIMEOUT = 15
 CACHE_TTL = 30 * 60
 MAX_CACHE_SIZE = 100
@@ -140,20 +140,11 @@ def format_duration(duration: Any) -> Optional[str]:
     return " ".join(parts)
 
 
-def get_scene_from_cache(cache: Dict[str, Any], scene_id: str) -> Optional[Dict[str, Any]]:
-    scenes = cache.get("scenes", [])
-    for scene in scenes:
-        if str(scene.get("id")) == str(scene_id):
-            return scene
-    return None
-
-
-def get_performer_from_scene(
-    scene: Dict[str, Any], performer_id: str
-) -> Optional[Dict[str, Any]]:
-    for performer in scene.get("performers") or []:
-        if str(performer.get("id")) == str(performer_id):
-            return performer
+def get_scene_from_cache(cache: Dict[str, Any], scene_index: int) -> Optional[Dict[str, Any]]:
+    """Get scene by index from cached results"""
+    scenes = cache.get("all_scenes", [])
+    if 0 <= scene_index < len(scenes):
+        return scenes[scene_index]
     return None
 
 
@@ -172,7 +163,7 @@ async def fetch_scenes(query: str, page: int = 1) -> Optional[Dict[str, Any]]:
         raise RuntimeError("PORNDB_API_TOKEN environment variable is not configured.")
 
     headers = {"Authorization": f"Bearer {API_TOKEN}", "Accept": "application/json"}
-    params = {"q": query, "per_page": PER_PAGE, "page": page}
+    params = {"q": query, "per_page": RESULTS_PER_PAGE, "page": page}
     timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
 
     try:
@@ -196,35 +187,38 @@ async def search_scenes(client: Client, message: Message):
     status = await message.reply_text("🔎 <i>Searching records...</i>")
 
     try:
-        data = await fetch_scenes(query)
+        data = await fetch_scenes(query, page=1)
         if not data or not data.get("data"):
             await status.edit_text("❌ No results found. Try a different search.")
             return
 
         scenes = data["data"]
+        total_results = data.get("meta", {}).get("total", len(scenes))
+        
         cache_key = get_cache_key(message)
-        cache_data = {"scenes": scenes, "page": 1, "query": query}
+        cache_data = {
+            "all_scenes": scenes,
+            "query": query,
+            "total_results": total_results,
+            "current_page_api": 1,
+        }
         save_cache(cache_key, cache_data)
 
-        await display_search_results(client, message, status, cache_key, scenes, 1)
+        await display_search_grid(client, message, status, cache_key, scenes)
     except Exception as e:
         await status.edit_text(f"❌ Error: {str(e)[:100]}")
 
 
-async def display_search_results(
+async def display_search_grid(
     client: Client,
     message: Message,
     status: Message,
     cache_key: tuple,
     scenes: List[Dict[str, Any]],
-    page: int,
 ):
-    start = (page - 1) * PER_PAGE
-    end = start + PER_PAGE
-    page_scenes = scenes[start:end]
-
-    if not page_scenes:
-        await status.edit_text("❌ No results on this page.")
+    """Display search results as a grid of clickable buttons"""
+    if not scenes:
+        await status.edit_text("❌ No results found.")
         return
 
     cache = get_cache(cache_key)
@@ -232,119 +226,55 @@ async def display_search_results(
         await status.edit_text("❌ Session expired.")
         return
 
-    # Update cache with current page
-    cache["page"] = page
-    save_cache(cache_key, cache)
+    # Create buttons for each scene
+    scene_buttons = []
+    for idx, scene in enumerate(scenes):
+        title = clean_value(scene.get("title")) or "Untitled"
+        site_name = scene.get("site", {}).get("name", "Unknown")
+        site_abbr = "".join([c for c in site_name.split() if c][:2]).upper() or "XX"
+        
+        # Truncate title to fit in button (Telegram button limit)
+        button_text = truncate_text(f"{title[:40]}", 40)
+        scene_buttons.append(
+            InlineKeyboardButton(
+                f"🎬 {button_text}",
+                callback_data=f"view_scene:{idx}",
+            )
+        )
 
-    first_scene = page_scenes[0]
-    title = clean_value(first_scene.get("title")) or "Unknown Scene"
-    poster = (
-        first_scene.get("poster")
-        or first_scene.get("image")
-        or "https://via.placeholder.com/400x600?text=No+Image"
-    )
-    duration_str = format_duration(first_scene.get("duration"))
-    release_date = clean_value(first_scene.get("release_date"))
-    director = clean_value(first_scene.get("director"))
-    site = first_scene.get("site") or {}
-    site_name = (
-        clean_value(site.get("name"))
-        if isinstance(site, dict)
-        else clean_value(site)
-    )
+    buttons = make_button_rows(scene_buttons, per_row=1)
 
-    studios = first_scene.get("studios") or []
-    studio_names = (
-        ", ".join([clean_value(s.get("name")) or str(s) for s in studios if s])
-        if studios
-        else None
-    )
+    # Add action buttons
+    buttons.append([
+        InlineKeyboardButton("🔄 New Search", callback_data="noop"),
+        InlineKeyboardButton("⛔ Close", callback_data="noop"),
+    ])
 
-    categories = first_scene.get("categories") or []
-    category_names = (
-        ", ".join([clean_value(c.get("name")) or str(c) for c in categories if c])
-        if categories
-        else None
-    )
+    caption = f"""
+<b>🔍 Search Results</b>
+Query: <code>{escape(cache.get('query', 'Unknown'))}</code>
+Found: <b>{cache.get('total_results', len(scenes))}</b> results
 
-    metadata = {
-        "📺 Site": site_name,
-        "🎞️ Duration": duration_str,
-        "📅 Release Date": release_date,
-        "👤 Director": director,
-        "🏢 Studio": studio_names,
-        "🎬 Categories": category_names,
-    }
-
-    caption = build_clean_caption(title, metadata)
-    buttons = []
-    
-    # Calculate total pages correctly
-    total_pages = (len(scenes) + PER_PAGE - 1) // PER_PAGE
-    
-    # Only show Next button if there are more pages
-    if page < total_pages:
-        buttons.append([InlineKeyboardButton("Next 📍", callback_data=f"page:{page+1}")])
-    
-    buttons.append([InlineKeyboardButton("📋 Scene Details", callback_data=f"show_sc:{first_scene.get('id')}")])
-    buttons.append([InlineKeyboardButton("⛔ Close", callback_data="noop")])
+Showing <b>{len(scenes)}</b> results per page.
+Click any title to view details 👇
+"""
 
     try:
         await status.delete()
     except Exception:
         pass
 
-    await client.send_photo(
+    await client.send_message(
         chat_id=message.chat.id,
-        photo=poster,
-        caption=caption,
+        text=caption,
         reply_markup=InlineKeyboardMarkup(buttons),
     )
 
 
-@Client.on_callback_query(filters.regex(r"^page:(\d+)$"))
-async def paginate_results(client: Client, callback: CallbackQuery):
-    try:
-        page = int(callback.data.split(":")[1])
-        cache_key = get_cache_key(callback)
-        cache = get_cache(cache_key)
-
-        if not cache:
-            await callback.answer("Session expired. Please search again.", show_alert=True)
-            return
-
-        scenes = cache.get("scenes", [])
-        total_pages = (len(scenes) + PER_PAGE - 1) // PER_PAGE
-
-        if page < 1 or page > total_pages:
-            await callback.answer(f"Invalid page. (Max: {total_pages})", show_alert=True)
-            return
-
-        await callback.answer()  # Acknowledge the button click
-
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
-
-        temp_status = await client.send_message(
-            chat_id=callback.message.chat.id, text="⏳ <i>Loading...</i>"
-        )
-        await display_search_results(
-            client, callback.message, temp_status, cache_key, scenes, page
-        )
-    except Exception as e:
-        print(f"Error in paginate_results: {e}")
-        try:
-            await callback.answer(f"Error: {str(e)[:50]}", show_alert=True)
-        except:
-            pass
-
-
-@Client.on_callback_query(filters.regex(r"^show_sc:(.+)$"))
-async def show_scene_details(client: Client, callback: CallbackQuery):
+@Client.on_callback_query(filters.regex(r"^view_scene:(\d+)$"))
+async def view_scene_details(client: Client, callback: CallbackQuery):
     await callback.answer()
-    scene_id = callback.data.split(":", 1)[1]
+    scene_index = int(callback.data.split(":")[1])
     cache_key = get_cache_key(callback)
     cache = get_cache(cache_key)
 
@@ -352,48 +282,42 @@ async def show_scene_details(client: Client, callback: CallbackQuery):
         await callback.answer("Session expired. Please search again.", show_alert=True)
         return
 
-    target_scene = get_scene_from_cache(cache, scene_id)
-    if not target_scene:
+    scene = get_scene_from_cache(cache, scene_index)
+    if not scene:
         await callback.answer("Scene data is no longer available.", show_alert=True)
         return
 
     poster = (
-        target_scene.get("poster")
-        or target_scene.get("image")
+        scene.get("poster")
+        or scene.get("image")
         or "https://via.placeholder.com/400x600?text=No+Image"
     )
-    duration_str = format_duration(target_scene.get("duration"))
-    release_date = clean_value(target_scene.get("release_date"))
-    director = clean_value(target_scene.get("director"))
-    site = target_scene.get("site") or {}
+    
+    duration_str = format_duration(scene.get("duration"))
+    release_date = clean_value(scene.get("date") or scene.get("release_date"))
+    director = clean_value(scene.get("director"))
+    site = scene.get("site") or {}
     site_name = (
         clean_value(site.get("name"))
         if isinstance(site, dict)
         else clean_value(site)
     )
 
-    studios = target_scene.get("studios") or []
+    studios = scene.get("studios") or []
     studio_names = (
         ", ".join([clean_value(s.get("name")) or str(s) for s in studios if s])
         if studios
         else None
     )
 
-    categories = target_scene.get("categories") or []
-    category_names = (
-        ", ".join([clean_value(c.get("name")) or str(c) for c in categories if c])
-        if categories
-        else None
-    )
-
-    tags = target_scene.get("tags") or []
+    tags = scene.get("tags") or []
     tag_names = (
         ", ".join([clean_value(t.get("name")) or str(t) for t in tags if t])
         if tags
         else None
     )
 
-    plot = clean_value(target_scene.get("plot"))
+    plot = clean_value(scene.get("description") or scene.get("plot"))
 
     metadata = {
         "📺 Site": site_name,
@@ -401,26 +325,24 @@ async def show_scene_details(client: Client, callback: CallbackQuery):
         "📅 Release Date": release_date,
         "👤 Director": director,
         "🏢 Studio": studio_names,
-        "🎬 Categories": category_names,
         "🏷️ Tags": tag_names,
-        "📖 Plot": plot,
+        "📖 Description": plot,
     }
 
-    caption = build_clean_caption(target_scene.get("title", "Scene Details"), metadata)
+    caption = build_clean_caption(scene.get("title", "Scene Details"), metadata)
     buttons = []
 
-    scene_url = clean_value(target_scene.get("url"))
+    scene_url = clean_value(scene.get("url"))
     if scene_url:
         buttons.append([InlineKeyboardButton("🔗 Open Scene Web Page", url=scene_url)])
 
-    performers = target_scene.get("performers") or []
+    performers = scene.get("performers") or []
     if performers:
         buttons.append(
-            [InlineKeyboardButton("🎭 Details About Performers", callback_data=f"list_perf:{scene_id}")]
+            [InlineKeyboardButton("🎭 View Performers", callback_data=f"list_perf:{scene_index}")]
         )
 
-    current_page = cache.get("page", 1)
-    buttons.append([InlineKeyboardButton("⬅️ Back to Results", callback_data=f"page:{current_page}")])
+    buttons.append([InlineKeyboardButton("⬅️ Back to Results", callback_data="back_to_results")])
 
     try:
         await callback.message.delete()
@@ -435,10 +357,10 @@ async def show_scene_details(client: Client, callback: CallbackQuery):
     )
 
 
-@Client.on_callback_query(filters.regex(r"^list_perf:(.+)$"))
+@Client.on_callback_query(filters.regex(r"^list_perf:(\d+)$"))
 async def list_performers(client: Client, callback: CallbackQuery):
     await callback.answer()
-    scene_id = callback.data.split(":", 1)[1]
+    scene_index = int(callback.data.split(":")[1])
     cache_key = get_cache_key(callback)
     cache = get_cache(cache_key)
 
@@ -446,7 +368,7 @@ async def list_performers(client: Client, callback: CallbackQuery):
         await callback.answer("Session expired. Please search again.", show_alert=True)
         return
 
-    scene = get_scene_from_cache(cache, scene_id)
+    scene = get_scene_from_cache(cache, scene_index)
     if not scene:
         await callback.answer("Scene data is no longer available.", show_alert=True)
         return
@@ -464,12 +386,12 @@ async def list_performers(client: Client, callback: CallbackQuery):
         performer_buttons.append(
             InlineKeyboardButton(
                 f"👤 {truncate_text(performer_name, 30)}",
-                callback_data=f"show_perf:{scene_id}:{performer_index}",
+                callback_data=f"show_perf:{scene_index}:{performer_index}",
             )
         )
 
     buttons = make_button_rows(performer_buttons, per_row=2)
-    buttons.append([InlineKeyboardButton("⬅️ Back to Scene Details", callback_data=f"show_sc:{scene_id}")])
+    buttons.append([InlineKeyboardButton("⬅️ Back to Scene", callback_data=f"view_scene:{scene_index}")])
 
     try:
         await callback.message.delete()
@@ -483,12 +405,11 @@ async def list_performers(client: Client, callback: CallbackQuery):
     )
 
 
-@Client.on_callback_query(filters.regex(r"^show_perf:(.+):(\d+)$"))
+@Client.on_callback_query(filters.regex(r"^show_perf:(\d+):(\d+)$"))
 async def display_performer(client: Client, callback: CallbackQuery):
     await callback.answer()
-    parts = callback.data.split(":", 2)
-    scene_id = parts[1]
-    performer_index = int(parts[2])  # Now using index instead of performer ID
+    scene_index = int(callback.data.split(":")[1])
+    performer_index = int(callback.data.split(":")[2])
     
     cache_key = get_cache_key(callback)
     cache = get_cache(cache_key)
@@ -497,7 +418,7 @@ async def display_performer(client: Client, callback: CallbackQuery):
         await callback.answer("Session expired. Please search again.", show_alert=True)
         return
 
-    scene = get_scene_from_cache(cache, scene_id)
+    scene = get_scene_from_cache(cache, scene_index)
     if not scene:
         await callback.answer("Scene data is no longer available.", show_alert=True)
         return
@@ -548,7 +469,7 @@ async def display_performer(client: Client, callback: CallbackQuery):
     )
 
     caption = build_clean_caption(performer_name, performer_details)
-    buttons = [[InlineKeyboardButton("⬅️ Back to Performers List", callback_data=f"list_perf:{scene_id}")]]
+    buttons = [[InlineKeyboardButton("⬅️ Back to Performers", callback_data=f"list_perf:{scene_index}")]]
 
     try:
         await callback.message.delete()
@@ -561,6 +482,32 @@ async def display_performer(client: Client, callback: CallbackQuery):
         caption=caption,
         reply_markup=InlineKeyboardMarkup(buttons),
     )
+
+
+@Client.on_callback_query(filters.regex(r"^back_to_results$"))
+async def back_to_results(client: Client, callback: CallbackQuery):
+    await callback.answer()
+    cache_key = get_cache_key(callback)
+    cache = get_cache(cache_key)
+
+    if not cache:
+        await callback.answer("Session expired. Please search again.", show_alert=True)
+        return
+
+    scenes = cache.get("all_scenes", [])
+    if not scenes:
+        await callback.answer("No cached results.", show_alert=True)
+        return
+
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    temp_status = await client.send_message(
+        chat_id=callback.message.chat.id, text="⏳ <i>Loading results...</i>"
+    )
+    await display_search_grid(client, callback.message, temp_status, cache_key, scenes)
 
 
 @Client.on_callback_query(filters.regex(r"^noop$"))
