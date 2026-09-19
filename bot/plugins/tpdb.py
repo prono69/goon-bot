@@ -166,6 +166,61 @@ def get_performer_by_index(
     return None
 
 
+def build_grid_payload(cache: Dict[str, Any], grid_page: int = 1) -> tuple:
+    scenes = cache.get("all_scenes", [])
+    total_scenes = len(scenes)
+    total_pages = math.ceil(total_scenes / RESULTS_PER_PAGE) or 1
+    grid_page = max(1, min(grid_page, total_pages))
+
+    cache["grid_page"] = grid_page
+
+    start_idx = (grid_page - 1) * RESULTS_PER_PAGE
+    end_idx = min(start_idx + RESULTS_PER_PAGE, total_scenes)
+    page_scenes = scenes[start_idx:end_idx]
+
+    scene_buttons = []
+    for offset, scene in enumerate(page_scenes):
+        actual_index = start_idx + offset
+        title = clean_value(scene.get("title")) or "Untitled"
+        button_text = truncate_text(title, 38)
+        scene_buttons.append(
+            InlineKeyboardButton(
+                f"🎬 {button_text}",
+                callback_data=f"view_scene:{actual_index}",
+            )
+        )
+
+    buttons = make_button_rows(scene_buttons, per_row=1)
+
+    if total_pages > 1:
+        nav_row = []
+        if grid_page > 1:
+            nav_row.append(InlineKeyboardButton("◀️ Prev", callback_data=f"grid_page:{grid_page - 1}"))
+        else:
+            nav_row.append(InlineKeyboardButton("⛔", callback_data="noop"))
+
+        nav_row.append(InlineKeyboardButton(f"Page {grid_page}/{total_pages}", callback_data="noop"))
+
+        if grid_page < total_pages:
+            nav_row.append(InlineKeyboardButton("Next ▶️", callback_data=f"grid_page:{grid_page + 1}"))
+        else:
+            nav_row.append(InlineKeyboardButton("⛔", callback_data="noop"))
+
+        buttons.append(nav_row)
+
+    buttons.append([InlineKeyboardButton("❌ Close", callback_data="close_menu")])
+
+    caption = f"""
+<b>🔍 Search Results</b>
+Query: <code>{escape(cache.get('query', 'Unknown'))}</code>
+Found: <b>{cache.get('total_results', total_scenes)}</b> total results
+
+Page <b>{grid_page}</b> of <b>{total_pages}</b> (Showing {start_idx + 1}-{end_idx} of {total_scenes})
+Click any title below to view full details 👇
+"""
+    return caption.strip(), InlineKeyboardMarkup(buttons)
+
+
 async def fetch_scenes(query: str, page: int = 1) -> Optional[Dict[str, Any]]:
     if not API_TOKEN:
         raise RuntimeError("PORNDB_API_TOKEN environment variable is not configured.")
@@ -212,94 +267,14 @@ async def search_scenes(client: Client, message: Message):
         }
         save_cache(cache_key, cache_data)
 
-        await display_search_grid(client, message, status, cache_key, grid_page=1)
+        text, reply_markup = build_grid_payload(cache_data, grid_page=1)
+        await status.edit_text(text=text, reply_markup=reply_markup)
     except Exception as e:
         await status.edit_text(f"❌ Error: {str(e)[:100]}")
 
 
-async def display_search_grid(
-    client: Client,
-    message: Message,
-    status: Message,
-    cache_key: tuple,
-    grid_page: int = 1,
-):
-    cache = get_cache(cache_key)
-    if not cache:
-        await status.edit_text("❌ Session expired.")
-        return
-
-    scenes = cache.get("all_scenes", [])
-    if not scenes:
-        await status.edit_text("❌ No results found.")
-        return
-
-    cache["grid_page"] = grid_page
-
-    total_scenes = len(scenes)
-    total_pages = math.ceil(total_scenes / RESULTS_PER_PAGE)
-    grid_page = max(1, min(grid_page, total_pages))
-
-    start_idx = (grid_page - 1) * RESULTS_PER_PAGE
-    end_idx = min(start_idx + RESULTS_PER_PAGE, total_scenes)
-    page_scenes = scenes[start_idx:end_idx]
-
-    scene_buttons = []
-    for offset, scene in enumerate(page_scenes):
-        actual_index = start_idx + offset
-        title = clean_value(scene.get("title")) or "Untitled"
-        button_text = truncate_text(title, 38)
-        scene_buttons.append(
-            InlineKeyboardButton(
-                f"🎬 {button_text}",
-                callback_data=f"view_scene:{actual_index}",
-            )
-        )
-
-    buttons = make_button_rows(scene_buttons, per_row=1)
-
-    if total_pages > 1:
-        nav_row = []
-        if grid_page > 1:
-            nav_row.append(InlineKeyboardButton("◀️ Prev", callback_data=f"grid_page:{grid_page - 1}"))
-        else:
-            nav_row.append(InlineKeyboardButton("⛔", callback_data="noop"))
-
-        nav_row.append(InlineKeyboardButton(f"Page {grid_page}/{total_pages}", callback_data="noop"))
-
-        if grid_page < total_pages:
-            nav_row.append(InlineKeyboardButton("Next ▶️", callback_data=f"grid_page:{grid_page + 1}"))
-        else:
-            nav_row.append(InlineKeyboardButton("⛔", callback_data="noop"))
-
-        buttons.append(nav_row)
-
-    buttons.append([InlineKeyboardButton("❌ Close", callback_data="close_menu")])
-
-    caption = f"""
-<b>🔍 Search Results</b>
-Query: <code>{escape(cache.get('query', 'Unknown'))}</code>
-Found: <b>{cache.get('total_results', total_scenes)}</b> total results
-
-Page <b>{grid_page}</b> of <b>{total_pages}</b> (Showing {start_idx + 1}-{end_idx} of {total_scenes})
-Click any title below to view full details 👇
-"""
-
-    try:
-        await status.delete()
-    except Exception:
-        pass
-
-    await client.send_message(
-        chat_id=message.chat.id,
-        text=caption,
-        reply_markup=InlineKeyboardMarkup(buttons),
-    )
-
-
 @Client.on_callback_query(filters.regex(r"^grid_page:(\d+)$"))
 async def paginate_grid(client: Client, callback: CallbackQuery):
-    await callback.answer()
     grid_page = int(callback.data.split(":")[1])
     cache_key = get_cache_key(callback)
     cache = get_cache(cache_key)
@@ -308,15 +283,14 @@ async def paginate_grid(client: Client, callback: CallbackQuery):
         await callback.answer("Session expired. Please search again.", show_alert=True)
         return
 
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
+    text, reply_markup = build_grid_payload(cache, grid_page=grid_page)
 
-    temp_status = await client.send_message(
-        chat_id=callback.message.chat.id, text="⏳ <i>Loading page...</i>"
-    )
-    await display_search_grid(client, callback.message, temp_status, cache_key, grid_page=grid_page)
+    # In-place edit for zero-flicker smooth pagination
+    try:
+        await callback.message.edit_text(text=text, reply_markup=reply_markup)
+        await callback.answer()
+    except Exception:
+        await callback.answer("Already on this page.")
 
 
 @Client.on_callback_query(filters.regex(r"^view_scene:(\d+)$"))
@@ -397,14 +371,9 @@ async def view_scene_details(client: Client, callback: CallbackQuery):
             [InlineKeyboardButton("🎭 View Performers", callback_data=f"list_perf:{scene_index}")]
         )
 
-    buttons.append([InlineKeyboardButton("⬅️ Back to Results", callback_data="back_to_results")])
+    buttons.append([InlineKeyboardButton("❌ Close Card", callback_data="close_menu")])
 
-    # Clean delete old text grid message before sending photo message
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
-
+    # Send photo details below without deleting the grid message
     try:
         await client.send_photo(
             chat_id=callback.message.chat.id,
@@ -413,7 +382,6 @@ async def view_scene_details(client: Client, callback: CallbackQuery):
             reply_markup=InlineKeyboardMarkup(buttons),
         )
     except Exception:
-        # Fallback to default placeholder if original image URL fails to load
         await client.send_photo(
             chat_id=callback.message.chat.id,
             photo=DEFAULT_POSTER,
@@ -454,8 +422,9 @@ async def list_performers(client: Client, callback: CallbackQuery):
         )
 
     buttons = make_button_rows(performer_buttons, per_row=2)
-    buttons.append([InlineKeyboardButton("⬅️ Back to Scene", callback_data=f"view_scene:{scene_index}")])
+    buttons.append([InlineKeyboardButton("⬅️ Back to Scene", callback_data=f"back_to_scene:{scene_index}")])
 
+    # Switch the current media card into text mode to pick performers
     try:
         await callback.message.delete()
     except Exception:
@@ -567,9 +536,10 @@ async def display_performer(client: Client, callback: CallbackQuery):
         )
 
 
-@Client.on_callback_query(filters.regex(r"^back_to_results$"))
-async def back_to_results(client: Client, callback: CallbackQuery):
+@Client.on_callback_query(filters.regex(r"^back_to_scene:(\d+)$"))
+async def back_to_scene(client: Client, callback: CallbackQuery):
     await callback.answer()
+    scene_index = int(callback.data.split(":")[1])
     cache_key = get_cache_key(callback)
     cache = get_cache(cache_key)
 
@@ -577,22 +547,71 @@ async def back_to_results(client: Client, callback: CallbackQuery):
         await callback.answer("Session expired. Please search again.", show_alert=True)
         return
 
-    scenes = cache.get("all_scenes", [])
-    if not scenes:
-        await callback.answer("No cached results.", show_alert=True)
+    scene = get_scene_from_cache(cache, scene_index)
+    if not scene:
+        await callback.answer("Scene data is no longer available.", show_alert=True)
         return
 
-    saved_page = cache.get("grid_page", 1)
+    poster = scene.get("poster") or scene.get("image") or DEFAULT_POSTER
+    duration_str = format_duration(scene.get("duration"))
+    release_date = clean_value(scene.get("date") or scene.get("release_date"))
+    director = clean_value(scene.get("director"))
+    site = scene.get("site") or {}
+    site_name = clean_value(site.get("name")) if isinstance(site, dict) else clean_value(site)
+
+    studios = scene.get("studios") or []
+    studio_names = ", ".join([clean_value(s.get("name")) or str(s) for s in studios if s]) if studios else None
+
+    tags = scene.get("tags") or []
+    tag_names = ", ".join([clean_value(t.get("name")) or str(t) for t in tags if t]) if tags else None
+
+    performers = scene.get("performers") or []
+    performer_names = ", ".join([clean_value(p.get("name")) or str(p) for p in performers if p]) if performers else None
+
+    plot = clean_value(scene.get("description") or scene.get("plot"))
+
+    metadata = {
+        "📺 Site": site_name,
+        "🎞️ Duration": duration_str,
+        "📅 Release Date": release_date,
+        "👤 Director": director,
+        "🏢 Studio": studio_names,
+        "🎭 Performers": performer_names,
+        "🏷️ Tags": tag_names,
+        "📖 Description": plot,
+    }
+
+    caption = build_clean_caption(scene.get("title", "Scene Details"), metadata)
+    buttons = []
+
+    scene_url = clean_value(scene.get("url"))
+    if scene_url:
+        buttons.append([InlineKeyboardButton("🔗 Open Scene Web Page", url=scene_url)])
+
+    if performers:
+        buttons.append([InlineKeyboardButton("🎭 View Performers", callback_data=f"list_perf:{scene_index}")])
+
+    buttons.append([InlineKeyboardButton("❌ Close Card", callback_data="close_menu")])
 
     try:
         await callback.message.delete()
     except Exception:
         pass
 
-    temp_status = await client.send_message(
-        chat_id=callback.message.chat.id, text="⏳ <i>Loading results...</i>"
-    )
-    await display_search_grid(client, callback.message, temp_status, cache_key, grid_page=saved_page)
+    try:
+        await client.send_photo(
+            chat_id=callback.message.chat.id,
+            photo=poster,
+            caption=caption,
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+    except Exception:
+        await client.send_photo(
+            chat_id=callback.message.chat.id,
+            photo=DEFAULT_POSTER,
+            caption=caption,
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
 
 
 @Client.on_callback_query(filters.regex(r"^close_menu$"))
