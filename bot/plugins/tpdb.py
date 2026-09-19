@@ -423,12 +423,13 @@ async def list_performers(client: Client, callback: CallbackQuery):
 
     buttons = make_button_rows(performer_buttons, per_row=2)
     buttons.append([InlineKeyboardButton("⬅️ Back to Scene", callback_data=f"back_to_scene:{scene_index}")])
+    await callback.answer("Fetching performers")
 
     # Switch the current media card into text mode to pick performers
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
+    #try:
+        #await callback.message.delete()
+    #except Exception:
+        #pass
 
     await client.send_message(
         chat_id=callback.message.chat.id,
@@ -514,6 +515,7 @@ async def display_performer(client: Client, callback: CallbackQuery):
 
     caption = build_clean_caption(performer_name, performer_details)
     buttons = [[InlineKeyboardButton("⬅️ Back to Performers", callback_data=f"list_perf:{scene_index}")]]
+    await callback.answer("Sending performer's details")
 
     try:
         await callback.message.delete()
