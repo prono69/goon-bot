@@ -4,6 +4,7 @@ from urllib.parse import quote, urljoin
 from typing import Optional
 
 import aiohttp
+from bot import logger
 from bs4 import BeautifulSoup
 from html_telegraph_poster import TelegraphPoster
 from pyrogram import Client, filters
@@ -79,7 +80,7 @@ def create_telegraph_page(title: str, img_urls: list[str]) -> Optional[str]:
         page = telegraph.post(title=f"{title} Gallery", author="NekoDrive", text=html_content)
         return page.get("url")
     except Exception as e:
-        print(f"[Babepedia] Telegraph error: {e}")
+        logger.error(f"[Babepedia] Telegraph error: {e}")
         return None
 
 
@@ -90,11 +91,11 @@ async def search_and_scrape_babepedia(
     try:
         async with session.get(f"{BABEPEDIA_BASE}/ajax-search.php?term={quote(query)}", headers=HEADERS) as resp:
             if resp.status != 200:
-                print(f"[Babepedia] Search HTTP status: {resp.status}")
+                logger.error(f"[Babepedia] Search HTTP status: {resp.status}")
                 return None, []
             search_results = await resp.json()
     except Exception as e:
-        print(f"[Babepedia] Search error: {e}")
+        logger.error(f"[Babepedia] Search error: {e}")
         return None, []
 
     if not search_results:
@@ -110,11 +111,11 @@ async def search_and_scrape_babepedia(
     try:
         async with session.get(profile_url, headers=HEADERS) as resp:
             if resp.status != 200:
-                print(f"[Babepedia] Profile HTTP status: {resp.status}")
+                logger.error(f"[Babepedia] Profile HTTP status: {resp.status}")
                 return None, []
             html_text = await resp.text()
     except Exception as e:
-        print(f"[Babepedia] Profile request error: {e}")
+        logger.error(f"[Babepedia] Profile request error: {e}")
         return None, []
 
     soup = BeautifulSoup(html_text, "html.parser")
@@ -179,7 +180,7 @@ async def search_and_scrape_babepedia(
     if not gallery_imgs and data.get("photo"):
         gallery_imgs.append(data["photo"])
 
-    print(f"[Babepedia] Found {len(gallery_imgs)} gallery images for {data['name']}")
+    logger.info(f"[Babepedia] Found {len(gallery_imgs)} gallery images for {data['name']}")
 
     telegraph_url = create_telegraph_page(data["name"], gallery_imgs) if gallery_imgs else None
     gallery_btn_url = telegraph_url or profile_url
@@ -228,7 +229,7 @@ async def babe_handler(client: Client, message: Message):
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
             data, keyboard = await search_and_scrape_babepedia(session, query)
     except Exception as e:
-        print(f"[Babepedia] Handler error: {e}")
+        logger.error(f"[Babepedia] Handler error: {e}")
         await status_msg.edit_text("❌ An error occurred while fetching the profile.")
         return
 
@@ -237,11 +238,15 @@ async def babe_handler(client: Client, message: Message):
         return
 
     caption = (
-        f"**{data['name']}**\n"
-        f"**Also known as:** {data['aka']}\n"
-        f"**Rating:** ⭐ {data['rating']}/10 ({data['votes']})\n\n"
-        + "\n".join(f"**{field}:** {data.get(field.lower().replace(' ', '_'), 'N/A')}" for field in BIO_FIELDS)
+    f"**{data['name']}**\n"
+    f"__Also known as:__ `{data['aka']}`\n"
+    f"**Rating:** ⭐ `{data['rating']}/10 ({data['votes']})`\n\n"
+    + "\n".join(
+        f"**{field}:** `{data.get(field.lower().replace(' ', '_'), 'N/A')}`"
+        + ("\n" if field == "Tattoos" else "")
+        for field in BIO_FIELDS
     )
+)
 
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
 
@@ -252,12 +257,12 @@ async def babe_handler(client: Client, message: Message):
 
     if data.get("photo"):
         try:
-            print(f"[Babepedia] Sending photo: {data['photo']}")
+            logger.info(f"[Babepedia] Sending photo: {data['photo']}")
             await message.reply_photo(photo=data["photo"], caption=caption, reply_markup=reply_markup)
             return
         except (WebpageCurlFailed, BadRequest) as e:
-            print(f"[Babepedia] Telegram could not load image: {e}")
+            logger.error(f"[Babepedia] Telegram could not load image: {e}")
         except Exception as e:
-            print(f"[Babepedia] Photo send error: {e}")
+            logger.error(f"[Babepedia] Photo send error: {e}")
 
     await message.reply_text(text=caption, reply_markup=reply_markup)
