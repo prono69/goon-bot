@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 import aiohttp
 from bot.config import PORNDB_API_TOKEN
 from pyrogram import Client, filters
-from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Message
 
 # Configuration
 API_URL = "https://api.theporndb.net/scenes"
@@ -16,6 +16,7 @@ RESULTS_PER_PAGE = 5  # Display 5 scene buttons per grid page
 REQUEST_TIMEOUT = 15
 CACHE_TTL = 30 * 60
 MAX_CACHE_SIZE = 100
+DEFAULT_POSTER = "https://via.placeholder.com/400x600?text=No+Image"
 
 USER_SEARCH_CACHE: Dict[Any, Dict[str, Any]] = {}
 
@@ -87,12 +88,6 @@ def truncate_text(text: str, max_length: int) -> str:
 
 
 def build_clean_caption(title: str, details: Dict[str, Any], max_length: int = 1024, special_field: str = "📖 Description") -> str:
-    """
-    Build caption with styled formatting:
-    - Title: bold + emoji
-    - Fields: bold field names
-    - Values: monospaced (code) for regular fields, italic for Description
-    """
     title = clean_value(title) or "Untitled"
     lines = [f"<b>🎬 {escape(title)}</b>", ""]
 
@@ -102,11 +97,9 @@ def build_clean_caption(title: str, details: Dict[str, Any], max_length: int = 1
             continue
         value = truncate_text(value, 450)
         
-        # Special formatting for description field (italic)
         if key == special_field:
             line = f"<b>{escape(key)}:</b> <i>{escape(value)}</i>"
         else:
-            # Regular fields with monospaced values
             line = f"<b>{escape(key)}:</b> <code>{escape(value)}</code>"
         
         candidate = "\n".join(lines + [line])
@@ -178,8 +171,7 @@ async def fetch_scenes(query: str, page: int = 1) -> Optional[Dict[str, Any]]:
         raise RuntimeError("PORNDB_API_TOKEN environment variable is not configured.")
 
     headers = {"Authorization": f"Bearer {API_TOKEN}", "Accept": "application/json"}
-    # Fetching up to 25 items to provide enough results for multi-page pagination
-    params = {"q": query, "per_page": 15, "page": page}
+    params = {"q": query, "per_page": 25, "page": page}
     timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
 
     try:
@@ -242,7 +234,6 @@ async def display_search_grid(
         await status.edit_text("❌ No results found.")
         return
 
-    # Update current grid page in cache
     cache["grid_page"] = grid_page
 
     total_scenes = len(scenes)
@@ -253,7 +244,6 @@ async def display_search_grid(
     end_idx = min(start_idx + RESULTS_PER_PAGE, total_scenes)
     page_scenes = scenes[start_idx:end_idx]
 
-    # Create scene buttons (5 per page)
     scene_buttons = []
     for offset, scene in enumerate(page_scenes):
         actual_index = start_idx + offset
@@ -268,7 +258,6 @@ async def display_search_grid(
 
     buttons = make_button_rows(scene_buttons, per_row=1)
 
-    # Add pagination controls if more than 1 page exists
     if total_pages > 1:
         nav_row = []
         if grid_page > 1:
@@ -349,7 +338,7 @@ async def view_scene_details(client: Client, callback: CallbackQuery):
     poster = (
         scene.get("poster")
         or scene.get("image")
-        or "https://via.placeholder.com/400x600?text=No+Image"
+        or DEFAULT_POSTER
     )
 
     duration_str = format_duration(scene.get("duration"))
@@ -376,7 +365,6 @@ async def view_scene_details(client: Client, callback: CallbackQuery):
         else None
     )
 
-    # Extract performer names from scene
     performers = scene.get("performers") or []
     performer_names = (
         ", ".join([clean_value(p.get("name")) or str(p) for p in performers if p])
@@ -411,21 +399,24 @@ async def view_scene_details(client: Client, callback: CallbackQuery):
 
     buttons.append([InlineKeyboardButton("⬅️ Back to Results", callback_data="back_to_results")])
 
-    # Edit message instead of delete and resend
+    # Clean delete old text grid message before sending photo message
     try:
-        await callback.message.edit_caption(
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    try:
+        await client.send_photo(
+            chat_id=callback.message.chat.id,
+            photo=poster,
             caption=caption,
             reply_markup=InlineKeyboardMarkup(buttons),
         )
     except Exception:
-        # Fallback: delete and resend if edit fails
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
+        # Fallback to default placeholder if original image URL fails to load
         await client.send_photo(
             chat_id=callback.message.chat.id,
-            photo=poster,
+            photo=DEFAULT_POSTER,
             caption=caption,
             reply_markup=InlineKeyboardMarkup(buttons),
         )
@@ -465,23 +456,16 @@ async def list_performers(client: Client, callback: CallbackQuery):
     buttons = make_button_rows(performer_buttons, per_row=2)
     buttons.append([InlineKeyboardButton("⬅️ Back to Scene", callback_data=f"view_scene:{scene_index}")])
 
-    # Edit message instead of delete and resend
     try:
-        await callback.message.edit_text(
-            text="<b>🎭 Select a Performer to view full profile:</b>",
-            reply_markup=InlineKeyboardMarkup(buttons),
-        )
+        await callback.message.delete()
     except Exception:
-        # Fallback: delete and resend
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
-        await client.send_message(
-            chat_id=callback.message.chat.id,
-            text="<b>🎭 Select a Performer to view full profile:</b>",
-            reply_markup=InlineKeyboardMarkup(buttons),
-        )
+        pass
+
+    await client.send_message(
+        chat_id=callback.message.chat.id,
+        text="<b>🎭 Select a Performer to view full profile:</b>",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
 
 
 @Client.on_callback_query(filters.regex(r"^show_perf:(\d+):(\d+)$"))
@@ -520,11 +504,8 @@ async def display_performer(client: Client, callback: CallbackQuery):
         or parent_data.get("image")
         or parent_data.get("thumbnail")
         or parent_data.get("face")
+        or DEFAULT_POSTER
     )
-
-    if not photo:
-        await callback.answer("No performer photo available.", show_alert=True)
-        return
 
     bio_text = (
         clean_value(target_performer.get("bio"))
@@ -565,21 +546,22 @@ async def display_performer(client: Client, callback: CallbackQuery):
     caption = build_clean_caption(performer_name, performer_details)
     buttons = [[InlineKeyboardButton("⬅️ Back to Performers", callback_data=f"list_perf:{scene_index}")]]
 
-    # Edit message instead of delete and resend
     try:
-        await callback.message.edit_caption(
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    try:
+        await client.send_photo(
+            chat_id=callback.message.chat.id,
+            photo=photo,
             caption=caption,
             reply_markup=InlineKeyboardMarkup(buttons),
         )
     except Exception:
-        # Fallback: delete and resend
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
         await client.send_photo(
             chat_id=callback.message.chat.id,
-            photo=photo,
+            photo=DEFAULT_POSTER,
             caption=caption,
             reply_markup=InlineKeyboardMarkup(buttons),
         )
@@ -600,7 +582,6 @@ async def back_to_results(client: Client, callback: CallbackQuery):
         await callback.answer("No cached results.", show_alert=True)
         return
 
-    # Retrieve the last viewed grid page
     saved_page = cache.get("grid_page", 1)
 
     try:
