@@ -1,5 +1,6 @@
 import asyncio
 import html
+import math
 import time
 from typing import Any, Dict, List, Optional
 
@@ -11,7 +12,7 @@ from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMa
 # Configuration
 API_URL = "https://api.theporndb.net/scenes"
 API_TOKEN = PORNDB_API_TOKEN
-RESULTS_PER_PAGE = 10  # Show 10 results per grid
+RESULTS_PER_PAGE = 5  # Display 5 scene buttons per grid page
 REQUEST_TIMEOUT = 15
 CACHE_TTL = 30 * 60
 MAX_CACHE_SIZE = 100
@@ -141,7 +142,6 @@ def format_duration(duration: Any) -> Optional[str]:
 
 
 def get_scene_from_cache(cache: Dict[str, Any], scene_index: int) -> Optional[Dict[str, Any]]:
-    """Get scene by index from cached results"""
     scenes = cache.get("all_scenes", [])
     if 0 <= scene_index < len(scenes):
         return scenes[scene_index]
@@ -151,7 +151,6 @@ def get_scene_from_cache(cache: Dict[str, Any], scene_index: int) -> Optional[Di
 def get_performer_by_index(
     scene: Dict[str, Any], performer_index: int
 ) -> Optional[Dict[str, Any]]:
-    """Get performer by list index instead of ID to keep callback data small"""
     performers = scene.get("performers") or []
     if 0 <= performer_index < len(performers):
         return performers[performer_index]
@@ -163,7 +162,8 @@ async def fetch_scenes(query: str, page: int = 1) -> Optional[Dict[str, Any]]:
         raise RuntimeError("PORNDB_API_TOKEN environment variable is not configured.")
 
     headers = {"Authorization": f"Bearer {API_TOKEN}", "Accept": "application/json"}
-    params = {"q": query, "per_page": RESULTS_PER_PAGE, "page": page}
+    # Fetching up to 25 items to provide enough results for multi-page pagination
+    params = {"q": query, "per_page": 15, "page": page}
     timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
 
     try:
@@ -194,17 +194,17 @@ async def search_scenes(client: Client, message: Message):
 
         scenes = data["data"]
         total_results = data.get("meta", {}).get("total", len(scenes))
-        
+
         cache_key = get_cache_key(message)
         cache_data = {
             "all_scenes": scenes,
             "query": query,
             "total_results": total_results,
-            "current_page_api": 1,
+            "grid_page": 1,
         }
         save_cache(cache_key, cache_data)
 
-        await display_search_grid(client, message, status, cache_key, scenes)
+        await display_search_grid(client, message, status, cache_key, grid_page=1)
     except Exception as e:
         await status.edit_text(f"❌ Error: {str(e)[:100]}")
 
@@ -214,49 +214,70 @@ async def display_search_grid(
     message: Message,
     status: Message,
     cache_key: tuple,
-    scenes: List[Dict[str, Any]],
+    grid_page: int = 1,
 ):
-    """Display search results as a grid of clickable buttons"""
-    if not scenes:
-        await status.edit_text("❌ No results found.")
-        return
-
     cache = get_cache(cache_key)
     if not cache:
         await status.edit_text("❌ Session expired.")
         return
 
-    # Create buttons for each scene
+    scenes = cache.get("all_scenes", [])
+    if not scenes:
+        await status.edit_text("❌ No results found.")
+        return
+
+    # Update current grid page in cache
+    cache["grid_page"] = grid_page
+
+    total_scenes = len(scenes)
+    total_pages = math.ceil(total_scenes / RESULTS_PER_PAGE)
+    grid_page = max(1, min(grid_page, total_pages))
+
+    start_idx = (grid_page - 1) * RESULTS_PER_PAGE
+    end_idx = min(start_idx + RESULTS_PER_PAGE, total_scenes)
+    page_scenes = scenes[start_idx:end_idx]
+
+    # Create scene buttons (5 per page)
     scene_buttons = []
-    for idx, scene in enumerate(scenes):
+    for offset, scene in enumerate(page_scenes):
+        actual_index = start_idx + offset
         title = clean_value(scene.get("title")) or "Untitled"
-        site_name = scene.get("site", {}).get("name", "Unknown")
-        site_abbr = "".join([c for c in site_name.split() if c][:2]).upper() or "XX"
-        
-        # Truncate title to fit in button (Telegram button limit)
-        button_text = truncate_text(f"{title[:40]}", 40)
+        button_text = truncate_text(title, 38)
         scene_buttons.append(
             InlineKeyboardButton(
                 f"🎬 {button_text}",
-                callback_data=f"view_scene:{idx}",
+                callback_data=f"view_scene:{actual_index}",
             )
         )
 
     buttons = make_button_rows(scene_buttons, per_row=1)
 
-    # Add action buttons
-    buttons.append([
-        InlineKeyboardButton("🔄 New Search", callback_data="noop"),
-        InlineKeyboardButton("⛔ Close", callback_data="noop"),
-    ])
+    # Add pagination controls if more than 1 page exists
+    if total_pages > 1:
+        nav_row = []
+        if grid_page > 1:
+            nav_row.append(InlineKeyboardButton("◀️ Prev", callback_data=f"grid_page:{grid_page - 1}"))
+        else:
+            nav_row.append(InlineKeyboardButton("⛔", callback_data="noop"))
+
+        nav_row.append(InlineKeyboardButton(f"Page {grid_page}/{total_pages}", callback_data="noop"))
+
+        if grid_page < total_pages:
+            nav_row.append(InlineKeyboardButton("Next ▶️", callback_data=f"grid_page:{grid_page + 1}"))
+        else:
+            nav_row.append(InlineKeyboardButton("⛔", callback_data="noop"))
+
+        buttons.append(nav_row)
+
+    buttons.append([InlineKeyboardButton("❌ Close", callback_data="close_menu")])
 
     caption = f"""
 <b>🔍 Search Results</b>
 Query: <code>{escape(cache.get('query', 'Unknown'))}</code>
-Found: <b>{cache.get('total_results', len(scenes))}</b> results
+Found: <b>{cache.get('total_results', total_scenes)}</b> total results
 
-Showing <b>{len(scenes)}</b> results per page.
-Click any title to view details 👇
+Page <b>{grid_page}</b> of <b>{total_pages}</b> (Showing {start_idx + 1}-{end_idx} of {total_scenes})
+Click any title below to view full details 👇
 """
 
     try:
@@ -269,6 +290,28 @@ Click any title to view details 👇
         text=caption,
         reply_markup=InlineKeyboardMarkup(buttons),
     )
+
+
+@Client.on_callback_query(filters.regex(r"^grid_page:(\d+)$"))
+async def paginate_grid(client: Client, callback: CallbackQuery):
+    await callback.answer()
+    grid_page = int(callback.data.split(":")[1])
+    cache_key = get_cache_key(callback)
+    cache = get_cache(cache_key)
+
+    if not cache:
+        await callback.answer("Session expired. Please search again.", show_alert=True)
+        return
+
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    temp_status = await client.send_message(
+        chat_id=callback.message.chat.id, text="⏳ <i>Loading page...</i>"
+    )
+    await display_search_grid(client, callback.message, temp_status, cache_key, grid_page=grid_page)
 
 
 @Client.on_callback_query(filters.regex(r"^view_scene:(\d+)$"))
@@ -292,7 +335,7 @@ async def view_scene_details(client: Client, callback: CallbackQuery):
         or scene.get("image")
         or "https://via.placeholder.com/400x600?text=No+Image"
     )
-    
+
     duration_str = format_duration(scene.get("duration"))
     release_date = clean_value(scene.get("date") or scene.get("release_date"))
     director = clean_value(scene.get("director"))
@@ -378,11 +421,9 @@ async def list_performers(client: Client, callback: CallbackQuery):
         await callback.answer("No performers listed for this item.", show_alert=True)
         return
 
-    # Use indices instead of IDs to keep callback data small (Telegram limit: 64 bytes)
     performer_buttons = []
     for performer_index, performer in enumerate(performers):
         performer_name = clean_value(performer.get("name")) or "Unknown Performer"
-        # Use index-based callback instead of performer ID
         performer_buttons.append(
             InlineKeyboardButton(
                 f"👤 {truncate_text(performer_name, 30)}",
@@ -410,7 +451,7 @@ async def display_performer(client: Client, callback: CallbackQuery):
     await callback.answer()
     scene_index = int(callback.data.split(":")[1])
     performer_index = int(callback.data.split(":")[2])
-    
+
     cache_key = get_cache_key(callback)
     cache = get_cache(cache_key)
 
@@ -423,23 +464,17 @@ async def display_performer(client: Client, callback: CallbackQuery):
         await callback.answer("Scene data is no longer available.", show_alert=True)
         return
 
-    # Retrieve performer by index
     target_performer = get_performer_by_index(scene, performer_index)
     if not target_performer:
         await callback.answer("Could not load performer information.", show_alert=True)
         return
 
     parent_data = target_performer.get("parent") or {}
-    
-    # Merge extras from multiple sources, with proper prioritization
-    # Priority: parent.extras > parent.extra > performer.extra
     parent_extras = parent_data.get("extras") or parent_data.get("extra") or {}
     performer_extra = target_performer.get("extra") or {}
-    
-    # Merge with parent_extras taking priority (it's more complete)
+
     extras = {**performer_extra, **parent_extras}
 
-    # Get photo from multiple sources
     photo = (
         target_performer.get("image")
         or target_performer.get("thumbnail")
@@ -453,13 +488,11 @@ async def display_performer(client: Client, callback: CallbackQuery):
         await callback.answer("No performer photo available.", show_alert=True)
         return
 
-    # Get biography from multiple sources
     bio_text = (
         clean_value(target_performer.get("bio"))
         or clean_value(parent_data.get("bio"))
     )
 
-    # Helper function to safely get extras with multiple key options
     def get_extra(key1, key2=None):
         value = extras.get(key1)
         if not value and key2:
@@ -478,7 +511,7 @@ async def display_performer(client: Client, callback: CallbackQuery):
         "👁 Eye Color": get_extra("eye_colour", "eye_color"),
         "💇 Hair Color": get_extra("haircolor", "hair_colour"),
         "✨ Astrology": get_extra("astrology"),
-        "💪 Tattooos": get_extra("tattoos"),
+        "💪 Tattoos": get_extra("tattoos"),
         "📌 Piercings": get_extra("piercings"),
         "✂️ Fake Boobs": get_extra("fakeboobs"),
         "👶 Ethnicity": get_extra("ethnicity"),
@@ -522,6 +555,9 @@ async def back_to_results(client: Client, callback: CallbackQuery):
         await callback.answer("No cached results.", show_alert=True)
         return
 
+    # Retrieve the last viewed grid page
+    saved_page = cache.get("grid_page", 1)
+
     try:
         await callback.message.delete()
     except Exception:
@@ -530,7 +566,16 @@ async def back_to_results(client: Client, callback: CallbackQuery):
     temp_status = await client.send_message(
         chat_id=callback.message.chat.id, text="⏳ <i>Loading results...</i>"
     )
-    await display_search_grid(client, callback.message, temp_status, cache_key, scenes)
+    await display_search_grid(client, callback.message, temp_status, cache_key, grid_page=saved_page)
+
+
+@Client.on_callback_query(filters.regex(r"^close_menu$"))
+async def close_menu(client: Client, callback: CallbackQuery):
+    await callback.answer()
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
 
 
 @Client.on_callback_query(filters.regex(r"^noop$"))
