@@ -338,8 +338,8 @@ async def view_scene_details(client: Client, callback: CallbackQuery):
         return
 
     poster = (
-        scene.get("poster")
-        or scene.get("image")
+        scene.get("image")
+        or scene.get("poster")
         or DEFAULT_POSTER
     )
 
@@ -425,7 +425,7 @@ async def view_scene_details(client: Client, callback: CallbackQuery):
 
 @Client.on_callback_query(filters.regex(r"^list_perf:(\d+)$"))
 async def list_performers(client: Client, callback: CallbackQuery):
-    await callback.answer("ok")
+    await callback.answer("Fetching Randis")
     scene_index = int(callback.data.split(":")[1])
     cache_key = get_cache_key(callback)
     cache = get_cache(cache_key)
@@ -444,6 +444,15 @@ async def list_performers(client: Client, callback: CallbackQuery):
         await callback.answer("No performers listed for this item.", show_alert=True)
         return
 
+    # QoL IMPROVEMENT: Single Performer Shortcut
+    # If there is only 1 performer, route directly to display_performer
+    if len(performers) == 1:
+        # Update callback data dynamically to point to performer index 0
+        callback.data = f"show_perf:{scene_index}:0"
+        await display_performer(client, callback)
+        return
+
+    # Otherwise, show the selection grid for multiple performers
     performer_buttons = []
     for performer_index, performer in enumerate(performers):
         performer_name = clean_value(performer.get("name")) or "Unknown Performer"
@@ -456,13 +465,13 @@ async def list_performers(client: Client, callback: CallbackQuery):
 
     buttons = make_button_rows(performer_buttons, per_row=2)
     buttons.append([InlineKeyboardButton("⬅️ Back to Scene", callback_data=f"back_to_scene:{scene_index}")])
-    await callback.answer("Fetching performers")
 
     await client.send_message(
         chat_id=callback.message.chat.id,
         text="<b>🎭 Select a Performer to view full profile:</b>",
         reply_markup=InlineKeyboardMarkup(buttons),
     )
+
 
 
 @Client.on_callback_query(filters.regex(r"^show_perf:(\d+):(\d+)$"))
