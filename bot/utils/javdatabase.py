@@ -22,13 +22,12 @@ HEADERS = {
 }
 
 # ============================================================
-# COMPILED REGEX PATTERNS
+# COMPILED REGEX PATTERNS (for static patterns only)
 # ============================================================
 
 _PATTERN_TAG_REMOVAL = re.compile(r"<[^>]+>")
 _PATTERN_BREAK_TAGS = re.compile(r"<(br|/p|/div|/li|/tr|/h[1-6])[^>]*>", re.IGNORECASE)
 _PATTERN_WHITESPACE = re.compile(r"\s+")
-_PATTERN_LABELED = re.compile(rf"(?is)<(?:p|div|li)[^>]*>.*?<b[^>]*>\s*{{}}\s*:?\s*</b>(.*?)</(?:p|div|li)>")
 _PATTERN_LINKS = re.compile(r"<a[^>]*>(.*?)</a>", re.IGNORECASE | re.DOTALL)
 _PATTERN_HEADING = re.compile(r"(?is)<h[1-6][^>]*>[^<]*About[^<]*JAV Movie[^<]*</h[1-6]>")
 _PATTERN_MOVIE_CODE = re.compile(r"\b[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+\b")
@@ -82,10 +81,12 @@ def _url_join(path: str) -> str:
 
 def _labeled_links(html: str, label: str) -> List[str]:
     """Extract links belonging to a labeled <p>/<div>/<li>."""
-    pattern = _PATTERN_LABELED.format(re.escape(label))
+    pattern = re.compile(
+        rf"(?is)<(?:p|div|li)[^>]*>.*?<b[^>]*>\s*{re.escape(label)}\s*:?\s*</b>(.*?)</(?:p|div|li)>"
+    )
     values = []
     
-    for match in re.finditer(pattern, html):
+    for match in pattern.finditer(html):
         for link in _PATTERN_LINKS.finditer(match.group(1)):
             value = _clean_html_text(link.group(1))
             if value and value not in values:
@@ -96,8 +97,10 @@ def _labeled_links(html: str, label: str) -> List[str]:
 
 def _labeled_single(html: str, label: str) -> Optional[str]:
     """Extract a single value from: <p><b>Label: </b>Value</p>"""
-    pattern = rf"(?is)<(?:p|div|li)[^>]*>\s*<b[^>]*>\s*{re.escape(label)}\s*:?\s*</b>\s*(.*?)</(?:p|div|li)>"
-    match = re.search(pattern, html)
+    pattern = re.compile(
+        rf"(?is)<(?:p|div|li)[^>]*>\s*<b[^>]*>\s*{re.escape(label)}\s*:?\s*</b>\s*(.*?)</(?:p|div|li)>"
+    )
+    match = pattern.search(html)
     
     if not match:
         return None
@@ -477,4 +480,3 @@ def safe_filename(name: str) -> str:
     name = re.sub(r'[\x00-\x1f\\/:*?"<>|]+', "-", name.strip())
     name = re.sub(r"\s+", "_", name)
     return name.strip("._-")[:200]
-    
