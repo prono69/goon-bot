@@ -86,7 +86,13 @@ def truncate_text(text: str, max_length: int) -> str:
     return text[: max_length - 3].rstrip() + "..."
 
 
-def build_clean_caption(title: str, details: Dict[str, Any], max_length: int = 1024) -> str:
+def build_clean_caption(title: str, details: Dict[str, Any], max_length: int = 1024, special_field: str = "📖 Description") -> str:
+    """
+    Build caption with styled formatting:
+    - Title: bold + emoji
+    - Fields: bold field names
+    - Values: monospaced (code) for regular fields, italic for Description
+    """
     title = clean_value(title) or "Untitled"
     lines = [f"<b>🎬 {escape(title)}</b>", ""]
 
@@ -95,7 +101,14 @@ def build_clean_caption(title: str, details: Dict[str, Any], max_length: int = 1
         if not value:
             continue
         value = truncate_text(value, 450)
-        line = f"<b>{escape(key)}:</b> {escape(value)}"
+        
+        # Special formatting for description field (italic)
+        if key == special_field:
+            line = f"<b>{escape(key)}:</b> <i>{escape(value)}</i>"
+        else:
+            # Regular fields with monospaced values
+            line = f"<b>{escape(key)}:</b> <code>{escape(value)}</code>"
+        
         candidate = "\n".join(lines + [line])
 
         if len(candidate) <= max_length:
@@ -104,7 +117,10 @@ def build_clean_caption(title: str, details: Dict[str, Any], max_length: int = 1
             remaining = max_length - len("\n".join(lines)) - 1
             if remaining > 20:
                 shortened = truncate_text(value, max(10, remaining - len(key) - 10))
-                line = f"<b>{escape(key)}:</b> {escape(shortened)}"
+                if key == special_field:
+                    line = f"<b>{escape(key)}:</b> <i>{escape(shortened)}</i>"
+                else:
+                    line = f"<b>{escape(key)}:</b> <code>{escape(shortened)}</code>"
                 candidate = "\n".join(lines + [line])
                 if len(candidate) <= max_length:
                     lines.append(line)
@@ -360,6 +376,14 @@ async def view_scene_details(client: Client, callback: CallbackQuery):
         else None
     )
 
+    # Extract performer names from scene
+    performers = scene.get("performers") or []
+    performer_names = (
+        ", ".join([clean_value(p.get("name")) or str(p) for p in performers if p])
+        if performers
+        else None
+    )
+
     plot = clean_value(scene.get("description") or scene.get("plot"))
 
     metadata = {
@@ -368,6 +392,7 @@ async def view_scene_details(client: Client, callback: CallbackQuery):
         "📅 Release Date": release_date,
         "👤 Director": director,
         "🏢 Studio": studio_names,
+        "🎭 Performers": performer_names,
         "🏷️ Tags": tag_names,
         "📖 Description": plot,
     }
@@ -379,7 +404,6 @@ async def view_scene_details(client: Client, callback: CallbackQuery):
     if scene_url:
         buttons.append([InlineKeyboardButton("🔗 Open Scene Web Page", url=scene_url)])
 
-    performers = scene.get("performers") or []
     if performers:
         buttons.append(
             [InlineKeyboardButton("🎭 View Performers", callback_data=f"list_perf:{scene_index}")]
@@ -387,17 +411,24 @@ async def view_scene_details(client: Client, callback: CallbackQuery):
 
     buttons.append([InlineKeyboardButton("⬅️ Back to Results", callback_data="back_to_results")])
 
+    # Edit message instead of delete and resend
     try:
-        await callback.message.delete()
+        await callback.message.edit_caption(
+            caption=caption,
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
     except Exception:
-        pass
-
-    await client.send_photo(
-        chat_id=callback.message.chat.id,
-        photo=poster,
-        caption=caption,
-        reply_markup=InlineKeyboardMarkup(buttons),
-    )
+        # Fallback: delete and resend if edit fails
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await client.send_photo(
+            chat_id=callback.message.chat.id,
+            photo=poster,
+            caption=caption,
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
 
 
 @Client.on_callback_query(filters.regex(r"^list_perf:(\d+)$"))
@@ -434,16 +465,23 @@ async def list_performers(client: Client, callback: CallbackQuery):
     buttons = make_button_rows(performer_buttons, per_row=2)
     buttons.append([InlineKeyboardButton("⬅️ Back to Scene", callback_data=f"view_scene:{scene_index}")])
 
+    # Edit message instead of delete and resend
     try:
-        await callback.message.delete()
+        await callback.message.edit_text(
+            text="<b>🎭 Select a Performer to view full profile:</b>",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
     except Exception:
-        pass
-
-    await client.send_message(
-        chat_id=callback.message.chat.id,
-        text="<b>🎭 Select a Performer to view full profile:</b>",
-        reply_markup=InlineKeyboardMarkup(buttons),
-    )
+        # Fallback: delete and resend
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await client.send_message(
+            chat_id=callback.message.chat.id,
+            text="<b>🎭 Select a Performer to view full profile:</b>",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
 
 
 @Client.on_callback_query(filters.regex(r"^show_perf:(\d+):(\d+)$"))
@@ -527,17 +565,24 @@ async def display_performer(client: Client, callback: CallbackQuery):
     caption = build_clean_caption(performer_name, performer_details)
     buttons = [[InlineKeyboardButton("⬅️ Back to Performers", callback_data=f"list_perf:{scene_index}")]]
 
+    # Edit message instead of delete and resend
     try:
-        await callback.message.delete()
+        await callback.message.edit_caption(
+            caption=caption,
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
     except Exception:
-        pass
-
-    await client.send_photo(
-        chat_id=callback.message.chat.id,
-        photo=photo,
-        caption=caption,
-        reply_markup=InlineKeyboardMarkup(buttons),
-    )
+        # Fallback: delete and resend
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await client.send_photo(
+            chat_id=callback.message.chat.id,
+            photo=photo,
+            caption=caption,
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
 
 
 @Client.on_callback_query(filters.regex(r"^back_to_results$"))
