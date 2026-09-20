@@ -1,13 +1,20 @@
 import asyncio
 import html
 import math
+import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
 from bot.config import PORNDB_API_TOKEN
 from pyrogram import Client, filters
-from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Message
+from pyrogram.errors import RPCError, WebpageCurlFailed
+from pyrogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 # Configuration
 API_URL = "https://api.theporndb.net/scenes"
@@ -16,7 +23,7 @@ RESULTS_PER_PAGE = 5
 REQUEST_TIMEOUT = 15
 CACHE_TTL = 30 * 60
 MAX_CACHE_SIZE = 100
-DEFAULT_POSTER = "https://via.placeholder.com/400x600?text=No+Image"
+DEFAULT_POSTER = "https://http.cat/400.jpg"
 
 # INCREASED CAPTION LIMIT for performer bios
 SCENE_CAPTION_LIMIT = 1024
@@ -91,34 +98,55 @@ def truncate_text(text: str, max_length: int) -> str:
     return text[: max_length - 3].rstrip() + "..."
 
 
+def parse_search_input(raw_input: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Parses user input into (query, parse_str).
+    Supports explicit flags (-p / --parse) or automatic pattern detection.
+    """
+    raw_input = raw_input.strip()
+
+    # 1. Explicit Flag (-p or --parse) anywhere in the string
+    flag_match = re.search(r"(.*?)\s*(?:-p|--parse)\s+(.+)", raw_input, re.IGNORECASE)
+    if flag_match:
+        query_part = flag_match.group(1).strip() or None
+        parse_part = flag_match.group(2).strip() or None
+        return query_part, parse_part
+
+    # 2. Heuristic Auto-Detection:
+    # Searches for a dot/dash separated string containing a date pattern (e.g. Studio.2023-01-01.Name)
+    date_pattern = r"([A-Za-z0-9\._-]+\.\d{2,4}[\.-]\d{2}[\.-]\d{2}[A-Za-z0-9\._-]*)"
+    match = re.search(date_pattern, raw_input)
+    if match:
+        parse_val = match.group(1)
+        query_val = raw_input.replace(parse_val, "").strip() or None
+        return query_val, parse_val
+
+    # 3. Standard fallback: Treat entire input as general query ('q')
+    return raw_input, None
+
+
 def build_clean_caption(
-    title: str, 
-    details: Dict[str, Any], 
-    max_length: int = 1024, 
-    special_field: str = "📖 Description"
+    title: str,
+    details: Dict[str, Any],
+    max_length: int = 1024,
+    special_field: str = "📖 Description",
 ) -> str:
-    """
-    FIXED: Special handling for descriptions/bios to ensure they always display
-    """
     title = clean_value(title) or "Untitled"
     lines = [f"<b>🎬 {escape(title)}</b>", ""]
 
-    # Extract the special field (description/bio) separately
     special_field_value = details.get(special_field)
     special_field_value = clean_value(special_field_value)
 
-    # Build other fields first (non-description)
     for key, value in details.items():
-        if key == special_field:  # Skip, we'll add this last
+        if key == special_field:
             continue
-            
+
         value = clean_value(value)
         if not value:
             continue
         value = truncate_text(value, 450)
-        
+
         line = f"<b>{escape(key)}:</b> <code>{escape(value)}</code>"
-        
         candidate = "\n".join(lines + [line])
 
         if len(candidate) <= max_length:
@@ -132,18 +160,18 @@ def build_clean_caption(
                 if len(candidate) <= max_length:
                     lines.append(line)
 
-    # ADD DESCRIPTION/BIO LAST - This ensures it's always included if space permits
     if special_field_value:
         desc_line = f"<b>{escape(special_field)}:</b> \n<i>{escape(special_field_value)}</i>"
         candidate = "\n".join(lines + [desc_line])
-        
+
         if len(candidate) <= max_length:
             lines.append(desc_line)
         else:
-            # Even if we're over limit, try to include a truncated version of the bio
             remaining = max_length - len("\n".join(lines)) - 1
-            if remaining > 50:  # Only if we have meaningful space left
-                shortened = truncate_text(special_field_value, max(30, remaining - len(special_field) - 10))
+            if remaining > 50:
+                shortened = truncate_text(
+                    special_field_value, max(30, remaining - len(special_field) - 10)
+                )
                 desc_line = f"<b>{escape(special_field)}:</b> <i>{escape(shortened)}</i>"
                 lines.append(desc_line)
 
@@ -224,14 +252,20 @@ def build_grid_payload(cache: Dict[str, Any], grid_page: int = 1) -> tuple:
     if total_pages > 1:
         nav_row = []
         if grid_page > 1:
-            nav_row.append(InlineKeyboardButton("◀️ Prev", callback_data=f"grid_page:{grid_page - 1}"))
+            nav_row.append(
+                InlineKeyboardButton("◀️ Prev", callback_data=f"grid_page:{grid_page - 1}")
+            )
         else:
             nav_row.append(InlineKeyboardButton("⛔", callback_data="noop"))
 
-        nav_row.append(InlineKeyboardButton(f"Page {grid_page}/{total_pages}", callback_data="noop"))
+        nav_row.append(
+            InlineKeyboardButton(f"Page {grid_page}/{total_pages}", callback_data="noop")
+        )
 
         if grid_page < total_pages:
-            nav_row.append(InlineKeyboardButton("Next ▶️", callback_data=f"grid_page:{grid_page + 1}"))
+            nav_row.append(
+                InlineKeyboardButton("Next ▶️", callback_data=f"grid_page:{grid_page + 1}")
+            )
         else:
             nav_row.append(InlineKeyboardButton("⛔", callback_data="noop"))
 
@@ -250,12 +284,23 @@ Click any title below to view full details 👇
     return caption.strip(), InlineKeyboardMarkup(buttons)
 
 
-async def fetch_scenes(query: str, page: int = 1) -> Optional[Dict[str, Any]]:
+async def fetch_scenes(
+    query: Optional[str] = None, parse_str: Optional[str] = None, page: int = 1
+) -> Optional[Dict[str, Any]]:
     if not API_TOKEN:
         raise RuntimeError("PORNDB_API_TOKEN environment variable is not configured.")
 
     headers = {"Authorization": f"Bearer {API_TOKEN}", "Accept": "application/json"}
-    params = {"q": query, "per_page": 25, "page": page}
+    params: Dict[str, Any] = {"per_page": 25, "page": page}
+
+    if query:
+        params["q"] = query
+    if parse_str:
+        params["parse"] = parse_str
+
+    if "q" not in params and "parse" not in params:
+        return None
+
     timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
 
     try:
@@ -272,14 +317,25 @@ async def fetch_scenes(query: str, page: int = 1) -> Optional[Dict[str, Any]]:
 async def search_scenes(client: Client, message: Message):
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2 or not parts[1].strip():
-        await message.reply_text("<b>Usage:</b> <code>/search &lt;query&gt;</code>")
+        await message.reply_text(
+            "<b>Usage:</b>\n"
+            "• Search query: <code>/pdb Brooke Bailey</code>\n"
+            "• Parse string: <code>/pdb -p Bang.Bros.2023-01-01.Brooke.Bailey.XXX</code>\n"
+            "• Auto-parse: <code>/pdb Bang.Bros.2023-01-01.Brooke.Bailey</code>"
+        )
         return
 
-    query = parts[1].strip()
+    raw_input = parts[1].strip()
+    query, parse_str = parse_search_input(raw_input)
+
+    if not query and not parse_str:
+        await message.reply_text("❌ Invalid input. Please provide a query or parse string.")
+        return
+
     status = await message.reply_text("🔎 <i>Searching records...</i>")
 
     try:
-        data = await fetch_scenes(query, page=1)
+        data = await fetch_scenes(query=query, parse_str=parse_str, page=1)
         if not data or not data.get("data"):
             await status.edit_text("❌ No results found. Try a different search.")
             return
@@ -287,10 +343,19 @@ async def search_scenes(client: Client, message: Message):
         scenes = data["data"]
         total_results = data.get("meta", {}).get("total", len(scenes))
 
+        if query and parse_str:
+            display_query = f"{query} [Parse: {parse_str}]"
+        elif parse_str:
+            display_query = f"Parse: {parse_str}"
+        else:
+            display_query = query
+
         cache_key = get_cache_key(message)
         cache_data = {
             "all_scenes": scenes,
-            "query": query,
+            "query": display_query,
+            "raw_query": query,
+            "parse_str": parse_str,
             "total_results": total_results,
             "grid_page": 1,
         }
@@ -312,6 +377,32 @@ async def paginate_grid(client: Client, callback: CallbackQuery):
         await callback.answer("Session expired. Please search again.", show_alert=True)
         return
 
+    scenes = cache.get("all_scenes", [])
+    required_index = (grid_page - 1) * RESULTS_PER_PAGE
+    is_last_page = cache.get("is_last_page", False)
+
+    # Only request more items if we lack data AND haven't reached the last API page
+    if required_index >= len(scenes) and not is_last_page:
+        api_page = math.ceil(len(scenes) / 25) + 1
+        raw_query = cache.get("raw_query")
+        parse_str = cache.get("parse_str")
+
+        more_data = await fetch_scenes(
+            query=raw_query, parse_str=parse_str, page=api_page
+        )
+        
+        fetched_items = more_data.get("data", []) if more_data else []
+        
+        if fetched_items:
+            scenes.extend(fetched_items)
+            cache["all_scenes"] = scenes
+            
+            # If the API returned fewer items than its full batch size (25), end reached
+            if len(fetched_items) < 25:
+                cache["is_last_page"] = True
+        else:
+            cache["is_last_page"] = True
+
     text, reply_markup = build_grid_payload(cache, grid_page=grid_page)
 
     try:
@@ -319,6 +410,7 @@ async def paginate_grid(client: Client, callback: CallbackQuery):
         await callback.answer()
     except Exception:
         await callback.answer("Already on this page.")
+
 
 
 @Client.on_callback_query(filters.regex(r"^view_scene:(\d+)$"))
@@ -337,20 +429,14 @@ async def view_scene_details(client: Client, callback: CallbackQuery):
         await callback.answer("Scene data is no longer available.", show_alert=True)
         return
 
-    poster = (
-        scene.get("image")
-        or scene.get("poster")
-        or DEFAULT_POSTER
-    )
+    poster = scene.get("image") or scene.get("poster") or DEFAULT_POSTER
 
     duration_str = format_duration(scene.get("duration"))
     release_date = clean_value(scene.get("date") or scene.get("release_date"))
     director = clean_value(scene.get("director"))
     site = scene.get("site") or {}
     site_name = (
-        clean_value(site.get("name"))
-        if isinstance(site, dict)
-        else clean_value(site)
+        clean_value(site.get("name")) if isinstance(site, dict) else clean_value(site)
     )
 
     studios = scene.get("studios") or []
@@ -374,7 +460,6 @@ async def view_scene_details(client: Client, callback: CallbackQuery):
         else None
     )
 
-    # FIXED: Use 'description' field (API provides 'description', not 'plot')
     plot = clean_value(scene.get("description"))
 
     metadata = {
@@ -389,11 +474,11 @@ async def view_scene_details(client: Client, callback: CallbackQuery):
     }
 
     caption = build_clean_caption(
-        scene.get("title", "Scene Details"), 
+        scene.get("title", "Scene Details"),
         metadata,
-        max_length=SCENE_CAPTION_LIMIT
+        max_length=SCENE_CAPTION_LIMIT,
     )
-    
+
     buttons = []
 
     scene_url = clean_value(scene.get("url"))
@@ -407,6 +492,7 @@ async def view_scene_details(client: Client, callback: CallbackQuery):
 
     buttons.append([InlineKeyboardButton("❌ Close Card", callback_data="close_menu")])
 
+    # Try sending photo; fallback to DEFAULT_POSTER if Telegram fails to curl image URL
     try:
         await client.send_photo(
             chat_id=callback.message.chat.id,
@@ -414,7 +500,7 @@ async def view_scene_details(client: Client, callback: CallbackQuery):
             caption=caption,
             reply_markup=InlineKeyboardMarkup(buttons),
         )
-    except Exception:
+    except (WebpageCurlFailed, RPCError, Exception):
         await client.send_photo(
             chat_id=callback.message.chat.id,
             photo=DEFAULT_POSTER,
@@ -425,7 +511,7 @@ async def view_scene_details(client: Client, callback: CallbackQuery):
 
 @Client.on_callback_query(filters.regex(r"^list_perf:(\d+)$"))
 async def list_performers(client: Client, callback: CallbackQuery):
-    await callback.answer("Fetching Randis")
+    await callback.answer("Fetching performers...")
     scene_index = int(callback.data.split(":")[1])
     cache_key = get_cache_key(callback)
     cache = get_cache(cache_key)
@@ -444,15 +530,12 @@ async def list_performers(client: Client, callback: CallbackQuery):
         await callback.answer("No performers listed for this item.", show_alert=True)
         return
 
-    # QoL IMPROVEMENT: Single Performer Shortcut
-    # If there is only 1 performer, route directly to display_performer
+    # Single Performer Shortcut
     if len(performers) == 1:
-        # Update callback data dynamically to point to performer index 0
         callback.data = f"show_perf:{scene_index}:0"
         await display_performer(client, callback)
         return
 
-    # Otherwise, show the selection grid for multiple performers
     performer_buttons = []
     for performer_index, performer in enumerate(performers):
         performer_name = clean_value(performer.get("name")) or "Unknown Performer"
@@ -464,14 +547,15 @@ async def list_performers(client: Client, callback: CallbackQuery):
         )
 
     buttons = make_button_rows(performer_buttons, per_row=2)
-    buttons.append([InlineKeyboardButton("⬅️ Back to Scene", callback_data=f"back_to_scene:{scene_index}")])
+    buttons.append(
+        [InlineKeyboardButton("⬅️ Back to Scene", callback_data=f"back_to_scene:{scene_index}")]
+    )
 
     await client.send_message(
         chat_id=callback.message.chat.id,
         text="<b>🎭 Select a Performer to view full profile:</b>",
         reply_markup=InlineKeyboardMarkup(buttons),
     )
-
 
 
 @Client.on_callback_query(filters.regex(r"^show_perf:(\d+):(\d+)$"))
@@ -497,13 +581,10 @@ async def display_performer(client: Client, callback: CallbackQuery):
         await callback.answer("Could not load performer information.", show_alert=True)
         return
 
-    # FIXED: Properly handle bio retrieval with fallback chain
     parent_data = target_performer.get("parent") or {}
-    
-    # Try multiple bio locations
-    bio_text = (
-        clean_value(target_performer.get("bio"))
-        or clean_value(parent_data.get("bio"))
+
+    bio_text = clean_value(target_performer.get("bio")) or clean_value(
+        parent_data.get("bio")
     )
 
     parent_extras = parent_data.get("extras") or parent_data.get("extra") or {}
@@ -544,7 +625,7 @@ async def display_performer(client: Client, callback: CallbackQuery):
         "📌 Piercings": get_extra("piercings"),
         "✂️ Fake Boobs": get_extra("fakeboobs"),
         "👶 Ethnicity": get_extra("ethnicity"),
-        "📖 Description": bio_text,  # Bio is now guaranteed to be retrieved correctly
+        "📖 Description": bio_text,
     }
 
     performer_name = (
@@ -553,42 +634,37 @@ async def display_performer(client: Client, callback: CallbackQuery):
         or "Performer Info"
     )
 
-    # FIXED: Use higher caption limit for performers to ensure bios display
     caption = build_clean_caption(
-        performer_name, 
-        performer_details,
-        max_length=PERFORMER_CAPTION_LIMIT
+        performer_name, performer_details, max_length=PERFORMER_CAPTION_LIMIT
     )
-    
-    # Platforms to skip
+
     SKIP_PLATFORMS = {"IAFD", "DATA18", "Indexxx", "StashDB", "Wikidata"}
 
     buttons = []
 
-    # Add social/profile links (2 per row)
     links = parent_data.get("extras", {}).get("links", {})
     if links:
         link_buttons = []
         for platform, url in links.items():
             if platform in SKIP_PLATFORMS:
                 continue
-            
+
             if url:
-                link_buttons.append(
-                    InlineKeyboardButton(f"🔗 {platform}", url=url)
-                )
-        
+                link_buttons.append(InlineKeyboardButton(f"🔗 {platform}", url=url))
+
         if link_buttons:
             buttons.extend(make_button_rows(link_buttons, per_row=2))
 
-    buttons.append([InlineKeyboardButton("⬅️ Back to Performers", callback_data=f"list_perf:{scene_index}")])
-    await callback.answer("Sending performer's details")
+    buttons.append(
+        [InlineKeyboardButton("⬅️ Back to Performers", callback_data=f"list_perf:{scene_index}")]
+    )
 
     try:
         await callback.message.delete()
     except Exception:
         pass
 
+    # Fallback to DEFAULT_POSTER if Telegram cannot curl the performer's photo
     try:
         await client.send_photo(
             chat_id=callback.message.chat.id,
@@ -596,7 +672,7 @@ async def display_performer(client: Client, callback: CallbackQuery):
             caption=caption,
             reply_markup=InlineKeyboardMarkup(buttons),
         )
-    except Exception:
+    except (WebpageCurlFailed, RPCError, Exception):
         await client.send_photo(
             chat_id=callback.message.chat.id,
             photo=DEFAULT_POSTER,
@@ -629,13 +705,25 @@ async def back_to_scene(client: Client, callback: CallbackQuery):
     site_name = clean_value(site.get("name")) if isinstance(site, dict) else clean_value(site)
 
     studios = scene.get("studios") or []
-    studio_names = ", ".join([clean_value(s.get("name")) or str(s) for s in studios if s]) if studios else None
+    studio_names = (
+        ", ".join([clean_value(s.get("name")) or str(s) for s in studios if s])
+        if studios
+        else None
+    )
 
     tags = scene.get("tags") or []
-    tag_names = ", ".join([clean_value(t.get("name")) or str(t) for t in tags if t]) if tags else None
+    tag_names = (
+        ", ".join([clean_value(t.get("name")) or str(t) for t in tags if t])
+        if tags
+        else None
+    )
 
     performers = scene.get("performers") or []
-    performer_names = ", ".join([clean_value(p.get("name")) or str(p) for p in performers if p]) if performers else None
+    performer_names = (
+        ", ".join([clean_value(p.get("name")) or str(p) for p in performers if p])
+        if performers
+        else None
+    )
 
     plot = clean_value(scene.get("description"))
 
@@ -653,9 +741,9 @@ async def back_to_scene(client: Client, callback: CallbackQuery):
     caption = build_clean_caption(
         scene.get("title", "Scene Details"),
         metadata,
-        max_length=SCENE_CAPTION_LIMIT
+        max_length=SCENE_CAPTION_LIMIT,
     )
-    
+
     buttons = []
 
     scene_url = clean_value(scene.get("url"))
@@ -674,6 +762,7 @@ async def back_to_scene(client: Client, callback: CallbackQuery):
     except Exception:
         pass
 
+    # Fallback to DEFAULT_POSTER if image fails to curl
     try:
         await client.send_photo(
             chat_id=callback.message.chat.id,
@@ -681,7 +770,7 @@ async def back_to_scene(client: Client, callback: CallbackQuery):
             caption=caption,
             reply_markup=InlineKeyboardMarkup(buttons),
         )
-    except Exception:
+    except (WebpageCurlFailed, RPCError, Exception):
         await client.send_photo(
             chat_id=callback.message.chat.id,
             photo=DEFAULT_POSTER,
