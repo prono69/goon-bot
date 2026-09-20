@@ -525,7 +525,7 @@ async def view_scene_details(client: Client, callback: CallbackQuery):
 
 @Client.on_callback_query(filters.regex(r"^list_perf:(\d+)$"))
 async def list_performers(client: Client, callback: CallbackQuery):
-    await callback.answer("Fetching performers...")
+    await callback.answer("Fetching Randis...")
     scene_index = int(callback.data.split(":")[1])
     cache_key = get_cache_key(callback)
     cache = get_cache(cache_key)
