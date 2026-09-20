@@ -249,7 +249,10 @@ def build_grid_payload(cache: Dict[str, Any], grid_page: int = 1) -> tuple:
 
     buttons = make_button_rows(scene_buttons, per_row=1)
 
-    if total_pages > 1:
+    is_last_page = cache.get("is_last_page", False)
+
+    # Show navigation row if there are multiple pages OR if more items can be loaded from API
+    if total_pages > 1 or not is_last_page:
         nav_row = []
         if grid_page > 1:
             nav_row.append(
@@ -258,11 +261,16 @@ def build_grid_payload(cache: Dict[str, Any], grid_page: int = 1) -> tuple:
         else:
             nav_row.append(InlineKeyboardButton("⛔", callback_data="noop"))
 
+        # Footer button showing current page and total loaded count
         nav_row.append(
-            InlineKeyboardButton(f"Page {grid_page}/{total_pages}", callback_data="noop")
+            InlineKeyboardButton(
+                f"Page {grid_page}/{total_pages} ({total_scenes} Loaded)",
+                callback_data="noop",
+            )
         )
 
-        if grid_page < total_pages:
+        # Show 'Next' if we have more local pages OR if we can fetch more items from the API
+        if grid_page < total_pages or not is_last_page:
             nav_row.append(
                 InlineKeyboardButton("Next ▶️", callback_data=f"grid_page:{grid_page + 1}")
             )
@@ -274,14 +282,20 @@ def build_grid_payload(cache: Dict[str, Any], grid_page: int = 1) -> tuple:
     buttons.append([InlineKeyboardButton("❌ Close", callback_data="close_menu")])
 
     caption = f"""
-<b>🔍 Search Results</b>
-Query: <code>{escape(cache.get('query', 'Unknown'))}</code>
-Found: <b>{cache.get('total_results', total_scenes)}</b> total results
+🎬 <b>S E A R C H  R E S U L T S</b>
 
-Page <b>{grid_page}</b> of <b>{total_pages}</b> (Showing {start_idx + 1}-{end_idx} of {total_scenes})
-Click any title below to view full details 👇
+│ 🔍 <b>Query:</b> <code>{escape(cache.get('query', 'Unknown'))}</code>
+│ 📂 <b>Matches:</b> <code>{cache.get('total_results', total_scenes)}</code>
+│ 📄 <b>Page:</b> {grid_page}/{total_pages}
+
+<blockquote>Showing <b>{start_idx + 1}–{end_idx}</b> of <b>{total_scenes}</b> cached results</blockquote>
+
+👇 <b>Tap a result below to inspect details:</b>
 """
+
+
     return caption.strip(), InlineKeyboardMarkup(buttons)
+
 
 
 async def fetch_scenes(
