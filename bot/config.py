@@ -60,10 +60,17 @@ START_TXT = """<b>🪶 Kᴏɴɪᴄʜɪᴡᴀ, {}! 🪶</b>
 
 <b>✨ Welcome aboard ✨</b>
 
-<b>🤖 I'm your friendly bot, ready to assist you anytime.</b>
-<b>⚡ Fast, reliable, and always online.</b>
+<blockquote><b>🔞 Ultimate NSFW Scene & Performer Search Bot</b>
+<b>⚡ Fast, reliable, and always online.</b></blockquote>
 
+<blockquote expandable>💡 <b>Search Examples & Tips:</b>
+• Standard Search: <code>/pdb Brooke Bailey</code>
+• Parse Filename: <code>/pdb -p Studio.2023.01.01.Name</code>
+• Auto-Date Parse: <code>/pdb Studio.2023-01-01.Name</code></blockquote>
+
+<b>Type <code>/pdb &lt;query&gt;</code> to begin!</b>
 """
+
 PORNHWADB_API_KEY = os.getenv("PORNHWADB_API_KEY", "pwdb")
 NHENTAI_API_KEY = os.getenv("NHENTAI_API_KEY", "put_api_key_here")
 PORNDB_API_TOKEN = os.getenv("PORNDB_API_TOKEN", "tpdb")

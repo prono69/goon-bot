@@ -8,10 +8,8 @@ from bot.config import API_ID, API_HASH, BOT_TOKEN
 from bot.database.db import mongo
 from pyrogram import Client, idle
 
-
 # Logging
 logger = setup_logger()
-
 
 async def run_bot() -> None:
     """Start and keep the Telegram bot running."""
@@ -51,10 +49,8 @@ async def run_bot() -> None:
         logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
         await app.start()
-
-        # -------------------------------------------------
+        
         # Edit restart message after bot has started
-        # -------------------------------------------------
         restart_chat_id = os.getenv("RESTART_CHAT_ID")
         restart_msg_id = os.getenv("RESTART_MSG_ID")
 
@@ -65,17 +61,12 @@ async def run_bot() -> None:
                     message_id=int(restart_msg_id),
                     text="✅ **Bot restarted successfully!**",
                 )
-
             except Exception:
-                logger.exception(
-                    "Failed to update restart success message."
-                )
-
+                logger.exception("Failed to update restart success message.")
+                
             finally:
                 os.environ.pop("RESTART_CHAT_ID", None)
                 os.environ.pop("RESTART_MSG_ID", None)
-
-        # -------------------------------------------------
 
         await mongo.connect()
         me = await app.get_me()
