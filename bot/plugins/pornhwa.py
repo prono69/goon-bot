@@ -46,10 +46,10 @@ def clean_query(text: str) -> tuple[str, str]:
 
     Supported:
 
-        /search title
-        /search title -pornhwa
-        /search title -char
-        /search title -all
+        /ph title
+        /ph title -pornhwa
+        /ph title -char
+        /ph title -all
     """
 
     text = text.strip()
@@ -235,26 +235,24 @@ def build_search_buttons(
     return buttons
 
 
-# ─────────────────────────────────────────────────────────────
 # /search
-# ─────────────────────────────────────────────────────────────
 
-@Client.on_message(filters.command("search"))
+@Client.on_message(filters.command(["ph", "hwa"]) & filters.text)
 async def search_cmd(client: Client, message: Message):
 
     if len(message.command) < 2:
 
         await message.reply_text(
             "🔎 <b>Usage:</b>\n\n"
-            "<code>/search query</code>\n\n"
+            "<code>/ph query</code>\n\n"
             "<b>Flags:</b>\n"
             "• <code>-pornhwa</code> — Search pornhwa\n"
             "• <code>-char</code> — Search characters\n"
             "• <code>-all</code> — Search everything\n\n"
             "<b>Examples:</b>\n"
-            "<code>/search solo leveling</code>\n"
-            "<code>/search john -char</code>\n"
-            "<code>/search hero -all</code>"
+            "<code>/ph Love Quest</code>\n"
+            "<code>/ph Jeong In‑Ha -char</code>\n"
+            "<code>/ph Love Quest -all</code>"
         )
 
         return
@@ -932,5 +930,5 @@ async def back_callback(
     await query.message.edit_text(
         "🔎 <b>Search session ended.</b>\n\n"
         "Use the search command again:\n\n"
-        "<code>/search your query</code>"
+        "<code>/ph your query</code>"
     )
