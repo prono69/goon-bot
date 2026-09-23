@@ -327,7 +327,7 @@ async def babe_inline_handler(client: Client, inline_query: InlineQuery):
             description=f"AKA: {data['aka']} | Rating: {data['rating']}/10",
             thumb_url=data.get("photo"),
             input_message_content=InputTextMessageContent(
-                text=caption,
+                message_text=caption,
                 link_preview_options=LinkPreviewOptions(is_disabled=False)
             ),
             reply_markup=reply_markup
