@@ -1,7 +1,8 @@
+import asyncio
 import json
 import re
-from urllib.parse import quote, urljoin
 from typing import Optional
+from urllib.parse import quote, urljoin
 
 import aiohttp
 from bot import logger
@@ -9,8 +10,15 @@ from bs4 import BeautifulSoup
 from html_telegraph_poster import TelegraphPoster
 from pyrogram import Client, filters
 from pyrogram.errors import BadRequest, WebpageCurlFailed
-from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
-
+from pyrogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InlineQueryResultArticle,
+    InlineQuery,
+    InputTextMessageContent,
+    LinkPreviewOptions,
+    Message,
+)
 
 HEADERS = {
     "User-Agent": (
@@ -82,6 +90,21 @@ def create_telegraph_page(title: str, img_urls: list[str]) -> Optional[str]:
     except Exception as e:
         logger.error(f"[Babepedia] Telegraph error: {e}")
         return None
+
+
+def build_caption(data: dict) -> str:
+    """Helper function to create formatted text/caption from scraped performer data."""
+    bio_text = "\n".join(
+        f"**{field}:** `{data.get(field.lower().replace(' ', '_'), 'N/A')}`"
+        + ("\n" if field == "Tattoos" else "")
+        for field in BIO_FIELDS
+    )
+    return (
+        f"**{data['name']}**\n"
+        f"__Also known as:__ `{data['aka']}`\n"
+        f"**Rating:** ⭐ `{data['rating']}/10 ({data['votes']})`\n\n"
+        f"{bio_text}"
+    )
 
 
 async def search_and_scrape_babepedia(
@@ -237,17 +260,7 @@ async def babe_handler(client: Client, message: Message):
         await status_msg.edit_text(f"❌ No results found for **{query}**.")
         return
 
-    caption = (
-    f"**{data['name']}**\n"
-    f"__Also known as:__ `{data['aka']}`\n"
-    f"**Rating:** ⭐ `{data['rating']}/10 ({data['votes']})`\n\n"
-    + "\n".join(
-        f"**{field}:** `{data.get(field.lower().replace(' ', '_'), 'N/A')}`"
-        + ("\n" if field == "Tattoos" else "")
-        for field in BIO_FIELDS
-    )
-)
-
+    caption = build_caption(data)
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
 
     try:
@@ -266,3 +279,59 @@ async def babe_handler(client: Client, message: Message):
             logger.error(f"[Babepedia] Photo send error: {e}")
 
     await message.reply_text(text=caption, reply_markup=reply_markup)
+
+
+@Client.on_inline_query()
+async def babe_inline_handler(client: Client, inline_query: InlineQuery):
+    query = inline_query.query.strip()
+    
+    # Strip optional prefix command if typed as `@bot babe <name>`
+    if query.lower().startswith("babe "):
+        query = query[5:].strip()
+
+    if not query:
+        await inline_query.answer(
+            results=[],
+            switch_pm_text="Type a performer's name to search...",
+            switch_pm_parameter="start"
+        )
+        return
+
+    try:
+        # Enforce a tight timeout so inline queries don't hang and expire (Telegram limits inline queries to ~10s)
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as session:
+            data, keyboard = await asyncio.wait_for(
+                search_and_scrape_babepedia(session, query), timeout=8.5
+            )
+    except Exception as e:
+        logger.error(f"[Babepedia] Inline search error: {e}")
+        data, keyboard = None, []
+
+    if not data:
+        await inline_query.answer(
+            results=[],
+            cache_time=1
+        )
+        return
+
+    caption = build_caption(data)
+    reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+    
+    # Include an image link preview at top if photo exists
+    if data.get("photo"):
+        caption = f"[\u200b]({data['photo']}){caption}"
+
+    results = [
+        InlineQueryResultArticle(
+            title=data["name"],
+            description=f"AKA: {data['aka']} | Rating: {data['rating']}/10",
+            thumb_url=data.get("photo"),
+            input_message_content=InputTextMessageContent(
+                text=caption,
+                link_preview_options=LinkPreviewOptions(is_disabled=False)
+            ),
+            reply_markup=reply_markup
+        )
+    ]
+
+    await inline_query.answer(results=results, cache_time=300)
