@@ -328,7 +328,7 @@ async def babe_inline_handler(client: Client, inline_query: InlineQuery):
             thumb_url=data.get("photo"),
             input_message_content=InputTextMessageContent(
                 message_text=caption,
-                link_preview_options=LinkPreviewOptions(is_disabled=False)
+                link_preview_options=LinkPreviewOptions(is_disabled=False, show_above_text=True)
             ),
             reply_markup=reply_markup
         )
