@@ -172,6 +172,7 @@ async def probe_gallery_fast(url: str, range_opt: str = None) -> Tuple[int, int,
     file_count = 0
     total_bytes = 0
     extracted_meta = {}
+    known_album_count = 0
 
     for line in lines:
         line = line.strip()
@@ -179,21 +180,32 @@ async def probe_gallery_fast(url: str, range_opt: str = None) -> Tuple[int, int,
             continue
         try:
             data = json.loads(line)
-            # gallery-dl standard output format: [type_id, url/item, metadata_dict]
+            # Format: [type_id, url/item, metadata_dict] or [type_id, metadata_dict]
             if isinstance(data, list) and len(data) >= 2:
-                # Capture metadata candidate
-                candidate = data[-1] if isinstance(data[-1], dict) else data[1]
+                msg_type = data[0]
+                candidate = data[-1] if isinstance(data[-1], dict) else (data[1] if isinstance(data[1], dict) else None)
+                
                 if isinstance(candidate, dict):
+                    # Cache first found metadata or keep searching for title/model_name
                     if not extracted_meta:
                         extracted_meta.update(candidate)
-                    else:
-                        # Keep checking for title or model_name if not yet found
-                        if not ("title" in extracted_meta or "model_name" in extracted_meta):
-                            extracted_meta.update(candidate)
+                    elif not ("title" in extracted_meta or "model_name" in extracted_meta):
+                        extracted_meta.update(candidate)
 
-                # Type 2 or 3 marks actionable media items
-                if data[0] in (2, 3):
-                    file_count += 1
+                    # Check if the site explicitly provides the total count (like 8muses "count": 8)
+                    cnt = candidate.get("count")
+                    if isinstance(cnt, int) and cnt > known_album_count:
+                        known_album_count = cnt
+
+                # Type 2, 3: Direct media / download targets
+                # Type 6: Sub-item / pagination URLs (Fapello, Reddit galleries, etc.)
+                if msg_type in (2, 3, 6):
+                    # Only increment count if msg_type is not a pure parent container (e.g. type 2 with no direct media)
+                    if msg_type == 2 and isinstance(data[1], dict):
+                        pass
+                    else:
+                        file_count += 1
+
                     if isinstance(candidate, dict):
                         size = candidate.get("filesize") or candidate.get("file_size")
                         if isinstance(size, (int, float)):
@@ -206,11 +218,17 @@ async def probe_gallery_fast(url: str, range_opt: str = None) -> Tuple[int, int,
                 size = data.get("filesize") or data.get("file_size")
                 if isinstance(size, (int, float)):
                     total_bytes += int(size)
+
         except Exception:
             continue
 
+    # If the site provided an explicit count in metadata, prioritize that
+    if known_album_count > 0:
+        file_count = known_album_count
+
     gallery_name = extract_custom_title(extracted_meta, url)
     return file_count, total_bytes, gallery_name
+
 
 
 async def run_gallery_dl(url: str, dest_dir: Path, status_msg: Message, range_opt: str = None) -> Tuple[int, str]:
