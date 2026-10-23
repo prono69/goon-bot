@@ -294,7 +294,7 @@ async def gdl_command_handler(client: Client, message: Message):
     range_match = re.search(r"-r\s+(\d+-\d+|\d+)", text)
     range_opt = range_match.group(1) if range_match else None
 
-    probing_msg = await message.reply_text("🔎 **Inspecting gallery link...**", quote=True)
+    probing_msg = await message.reply_text("🔎 **Inspecting gallery link...**")
 
     file_count, total_bytes, gallery_name = await probe_gallery_fast(url, range_opt)
 
