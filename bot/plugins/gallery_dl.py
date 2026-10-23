@@ -166,69 +166,81 @@ async def probe_gallery_fast(url: str, range_opt: str = None) -> Tuple[int, int,
         stderr=asyncio.subprocess.DEVNULL,
     )
 
-    stdout, _ = await proc.communicate()
-    lines = stdout.decode("utf-8", errors="ignore").strip().splitlines()
+    stdout_bytes, _ = await proc.communicate()
+    raw_output = stdout_bytes.decode("utf-8", errors="ignore").strip()
 
     file_count = 0
     total_bytes = 0
     extracted_meta = {}
     known_album_count = 0
 
-    for line in lines:
-        line = line.strip()
-        if not line or not (line.startswith("{") or line.startswith("[")):
-            continue
-        try:
-            data = json.loads(line)
-            # Format: [type_id, url/item, metadata_dict] or [type_id, metadata_dict]
-            if isinstance(data, list) and len(data) >= 2:
-                msg_type = data[0]
-                candidate = data[-1] if isinstance(data[-1], dict) else (data[1] if isinstance(data[1], dict) else None)
-                
-                if isinstance(candidate, dict):
-                    # Cache first found metadata or keep searching for title/model_name
-                    if not extracted_meta:
-                        extracted_meta.update(candidate)
-                    elif not ("title" in extracted_meta or "model_name" in extracted_meta):
-                        extracted_meta.update(candidate)
+    if not raw_output:
+        return 0, 0, sanitize_filename(urlparse(url).path.strip("/").split("/")[-1] or "Gallery")
 
-                    # Check if the site explicitly provides the total count (like 8muses "count": 8)
-                    cnt = candidate.get("count")
-                    if isinstance(cnt, int) and cnt > known_album_count:
-                        known_album_count = cnt
+    # 1. Try parsing full JSON payload (gallery-dl -j dumps an entire JSON array)
+    records = []
+    try:
+        parsed = json.loads(raw_output)
+        if isinstance(parsed, list):
+            records = parsed
+        elif isinstance(parsed, dict):
+            records = [parsed]
+    except Exception:
+        # Fallback for NDJSON (line by line)
+        for line in raw_output.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                item = json.loads(line)
+                records.append(item)
+            except Exception:
+                continue
 
-                # Type 2, 3: Direct media / download targets
-                # Type 6: Sub-item / pagination URLs (Fapello, Reddit galleries, etc.)
-                if msg_type in (2, 3, 6):
-                    # Only increment count if msg_type is not a pure parent container (e.g. type 2 with no direct media)
-                    if msg_type == 2 and isinstance(data[1], dict):
-                        pass
-                    else:
-                        file_count += 1
+    # 2. Iterate through parsed records
+    for data in records:
+        if isinstance(data, list) and len(data) >= 2:
+            msg_type = data[0]
+            # Candidate metadata dict is typically at index 1 or index -1
+            candidate = data[-1] if isinstance(data[-1], dict) else (data[1] if isinstance(data[1], dict) else None)
 
-                    if isinstance(candidate, dict):
-                        size = candidate.get("filesize") or candidate.get("file_size")
-                        if isinstance(size, (int, float)):
-                            total_bytes += int(size)
-
-            elif isinstance(data, dict):
-                file_count += 1
+            if isinstance(candidate, dict):
                 if not extracted_meta:
-                    extracted_meta = data
-                size = data.get("filesize") or data.get("file_size")
-                if isinstance(size, (int, float)):
-                    total_bytes += int(size)
+                    extracted_meta.update(candidate)
+                elif not ("title" in extracted_meta or "model_name" in extracted_meta):
+                    extracted_meta.update(candidate)
 
-        except Exception:
-            continue
+                cnt = candidate.get("count")
+                if isinstance(cnt, int) and cnt > known_album_count:
+                    known_album_count = cnt
 
-    # If the site provided an explicit count in metadata, prioritize that
+            # Type 2, 3: direct media items
+            # Type 6: sub-item / pagination URLs (Fapello, Cyberdrop, Kemono, etc.)
+            if msg_type in (2, 3, 6):
+                # Type 2 with an info dict at index 1 is usually the root album header
+                if msg_type == 2 and isinstance(data[1], dict):
+                    pass
+                else:
+                    file_count += 1
+
+                if isinstance(candidate, dict):
+                    size = candidate.get("filesize") or candidate.get("file_size")
+                    if isinstance(size, (int, float)):
+                        total_bytes += int(size)
+
+        elif isinstance(data, dict):
+            file_count += 1
+            if not extracted_meta:
+                extracted_meta = data
+            size = data.get("filesize") or data.get("file_size")
+            if isinstance(size, (int, float)):
+                total_bytes += int(size)
+
     if known_album_count > 0:
         file_count = known_album_count
 
     gallery_name = extract_custom_title(extracted_meta, url)
     return file_count, total_bytes, gallery_name
-
 
 
 async def run_gallery_dl(url: str, dest_dir: Path, status_msg: Message, range_opt: str = None) -> Tuple[int, str]:
