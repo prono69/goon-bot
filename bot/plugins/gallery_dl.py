@@ -344,7 +344,7 @@ async def gdl_command_handler(client: Client, message: Message):
 
     keyboard = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🖼️ Normal (Media/Albums)", callback_data=f"gdl_norm|{session_id}"),
+            InlineKeyboardButton("🖼️ Normal (Albums)", callback_data=f"gdl_norm|{session_id}"),
             InlineKeyboardButton("🗜️ Upload as ZIP", callback_data=f"gdl_zip|{session_id}"),
         ],
         [
