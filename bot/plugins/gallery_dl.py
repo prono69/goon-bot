@@ -47,7 +47,6 @@ URL_REGEX = re.compile(r"https?://\S+")
 PIXIV_REGEX = re.compile(r"https?://(?:www\.)?pixiv\.net/\S+", re.IGNORECASE)
 
 
-
 # ==================== HELPER UTILITIES ====================
 
 def human_bytes(size: float) -> str:
@@ -74,7 +73,6 @@ def extract_custom_title(metadata: dict, url: str) -> str:
     """
     category = metadata.get("category", "").strip()
 
-    # 1. Search for title (top-level or inside album dict)
     title = metadata.get("title")
     if not title and isinstance(metadata.get("album"), dict):
         title = metadata["album"].get("title")
@@ -83,13 +81,11 @@ def extract_custom_title(metadata: dict, url: str) -> str:
         name = f"{title.strip()} ({category})" if category else title.strip()
         return sanitize_filename(name)
 
-    # 2. Search for model_name
     model_name = metadata.get("model_name")
     if model_name and isinstance(model_name, str) and model_name.strip():
         name = f"{model_name.strip()} ({category})" if category else model_name.strip()
         return sanitize_filename(name)
 
-    # 3. Fallback to URL endpoint path
     parsed = urlparse(url)
     slug = parsed.path.strip("/").split("/")[-1]
     if slug:
@@ -99,25 +95,33 @@ def extract_custom_title(metadata: dict, url: str) -> str:
     return "Gallery_Download"
 
 
-async def progress_bar(current: int, total: int, status_msg: Message, start_time: float, prefix: str = "Uploading"):
-    """Throttled progress update for Telegram uploads."""
-    now = time.time()
-    diff = now - start_time
-    if round(diff % 4.00) == 0 or current == total:
-        percentage = current * 100 / total if total else 0
-        speed = current / diff if diff > 0 else 0
-        filled = int(percentage / 10)
-        bar = "█" * filled + "░" * (10 - filled)
-        text = (
-            f"**{prefix}...**\n"
-            f"`[{bar}]` {percentage:.1f}%\n"
-            f"**Size:** {human_bytes(current)} / {human_bytes(total)}\n"
-            f"**Speed:** {human_bytes(speed)}/s"
-        )
-        try:
-            await status_msg.edit_text(text)
-        except Exception:
-            pass
+class ProgressTracker:
+    """Accurate, non-blocking upload progress callback tracker."""
+    def __init__(self, status_msg: Message, prefix: str = "Uploading"):
+        self.status_msg = status_msg
+        self.prefix = prefix
+        self.start_time = time.time()
+        self.last_update = 0.0
+
+    async def __call__(self, current: int, total: int):
+        now = time.time()
+        if (now - self.last_update >= 3.0) or current == total:
+            self.last_update = now
+            diff = now - self.start_time
+            percentage = current * 100 / total if total else 0
+            speed = current / diff if diff > 0 else 0
+            filled = int(percentage / 10)
+            bar = "█" * filled + "░" * (10 - filled)
+            text = (
+                f"**{self.prefix}...**\n"
+                f"`[{bar}]` {percentage:.1f}%\n"
+                f"**Size:** {human_bytes(current)} / {human_bytes(total)}\n"
+                f"**Speed:** {human_bytes(speed)}/s"
+            )
+            try:
+                await self.status_msg.edit_text(text)
+            except Exception:
+                pass
 
 
 async def safe_tg_call(coro, *args, **kwargs):
@@ -147,7 +151,6 @@ async def probe_gallery_fast(url: str, range_opt: str = None) -> Tuple[int, int,
     """
     Simulates extraction via gallery-dl -j to discover file count,
     cumulative size (if available), and dynamic gallery name.
-    Returns: (file_count, total_bytes, gallery_name, raw_error)
     """
     cmd = [
         "gallery-dl",
@@ -276,7 +279,7 @@ async def run_gallery_dl(url: str, dest_dir: Path, status_msg: Message, range_op
         if decoded:
             downloaded_count += 1
             now = time.time()
-            if now - last_edit >= 3.5:
+            if now - last_edit >= 3.0:
                 try:
                     await status_msg.edit_text(
                         f"📥 **Downloading Gallery...**\n"
@@ -308,20 +311,16 @@ async def gdl_command_handler(client: Client, message: Message):
     """Entry point: /gdl <url>, /dl <url>, or direct Pixiv URL."""
     text = message.text or ""
     
-    # First priority: check if message contains a Pixiv URL
     pixiv_urls = PIXIV_REGEX.findall(text)
     if pixiv_urls:
         urls = pixiv_urls
     else:
-        # Fallback to general URL extraction if triggered via /gdl
         urls = URL_REGEX.findall(text)
 
-    # Check replied message if command was sent as a reply
     if not urls and message.reply_to_message:
         reply_text = message.reply_to_message.text or message.reply_to_message.caption or ""
         urls = PIXIV_REGEX.findall(reply_text) or URL_REGEX.findall(reply_text)
 
-    # If it was triggered via /gdl without any link, show usage
     if not urls:
         return await message.reply_text(
             "❌ **Please provide a valid URL!**\n\n"
@@ -379,7 +378,6 @@ async def gdl_command_handler(client: Client, message: Message):
         "How would you like to receive this gallery?",
         reply_markup=keyboard,
     )
-
 
 
 @Client.on_message(filters.command("setcookies") & filters.reply)
@@ -462,7 +460,7 @@ async def gdl_callback_handler(client: Client, query: CallbackQuery):
                         f"❌ **Archive is too large ({human_bytes(zip_size)})** for Telegram (Max 2GB)!"
                     )
 
-                start_t = time.time()
+                tracker = ProgressTracker(status_msg, prefix="Uploading ZIP")
                 await safe_tg_call(
                     client.send_document,
                     chat_id=query.message.chat.id,
@@ -470,8 +468,7 @@ async def gdl_callback_handler(client: Client, query: CallbackQuery):
                     file_name=f"{gallery_name}.zip",
                     caption=f"📦 **{gallery_name}**\n📁 Files: `{total_files}`\n📦 Size: `{human_bytes(zip_size)}`\n🔗 [Source URL]({url})",
                     reply_to_message_id=query.message.reply_to_message_id,
-                    progress=progress_bar,
-                    progress_args=(status_msg, start_t, "Uploading ZIP"),
+                    progress=tracker,
                 )
                 if zip_path.exists():
                     zip_path.unlink()
@@ -497,14 +494,17 @@ async def gdl_callback_handler(client: Client, query: CallbackQuery):
                             reply_to_message_id=query.message.reply_to_message_id,
                         )
                     else:
+                        # Pre-upload files concurrently via client.save_file to prevent MTProto sequential lag
+                        uploaded_files = await asyncio.gather(
+                            *[safe_tg_call(client.save_file, str(f)) for f in batch]
+                        )
                         last_idx = len(batch) - 1
                         media_group = [
                             InputMediaDocument(
-                                media=str(f),
-                                # Attach caption strictly to the bottom item of this batch
+                                media=uploaded_files[idx],
                                 caption=batch_caption if idx == last_idx else ""
                             )
-                            for idx, f in enumerate(batch)
+                            for idx in range(len(batch))
                         ]
                         await safe_tg_call(
                             client.send_media_group,
@@ -512,7 +512,7 @@ async def gdl_callback_handler(client: Client, query: CallbackQuery):
                             media=media_group,
                             reply_to_message_id=query.message.reply_to_message_id,
                         )
-                    await asyncio.sleep(1.5)
+                    await asyncio.sleep(0.1)
 
             # -------------------- MODE 3: NORMAL MEDIA / ALBUMS --------------------
             elif action == "gdl_norm":
@@ -525,7 +525,6 @@ async def gdl_callback_handler(client: Client, query: CallbackQuery):
                     ext = file_path.suffix.lower()
                     f_size = file_path.stat().st_size
 
-                    # Telegram has a 10MB limit for compressed send_photo
                     if ext in IMAGE_EXTS and f_size <= 10 * 1024 * 1024:
                         album_items.append(("photo", file_path))
                     elif ext in VIDEO_EXTS and f_size <= TG_MAX_FILE_SIZE:
@@ -566,15 +565,18 @@ async def gdl_callback_handler(client: Client, query: CallbackQuery):
                                 reply_to_message_id=query.message.reply_to_message_id,
                             )
                     else:
+                        # Parallel pre-upload of the album batch
+                        uploaded_files = await asyncio.gather(
+                            *[safe_tg_call(client.save_file, str(f_path)) for _, f_path in chunk]
+                        )
                         last_idx = len(chunk) - 1
                         media_group = []
-                        for idx, (m_type, f_path) in enumerate(chunk):
-                            # Put caption on the LAST item of EVERY chunk so it stays anchored at the bottom
+                        for idx, (m_type, _) in enumerate(chunk):
                             cap = batch_caption if idx == last_idx else ""
                             if m_type == "photo":
-                                media_group.append(InputMediaPhoto(media=str(f_path), caption=cap))
+                                media_group.append(InputMediaPhoto(media=uploaded_files[idx], caption=cap))
                             else:
-                                media_group.append(InputMediaVideo(media=str(f_path), caption=cap))
+                                media_group.append(InputMediaVideo(media=uploaded_files[idx], caption=cap))
 
                         try:
                             await safe_tg_call(
@@ -591,7 +593,7 @@ async def gdl_callback_handler(client: Client, query: CallbackQuery):
                                     document=str(f_path),
                                     caption=batch_caption if idx_f == len(chunk) - 1 else None,
                                 )
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(0.1)
 
                 # Standalone single items (GIFs or oversized >10MB images)
                 for idx, f_path in enumerate(singles):
@@ -612,7 +614,7 @@ async def gdl_callback_handler(client: Client, query: CallbackQuery):
                             caption=single_caption,
                             reply_to_message_id=query.message.reply_to_message_id,
                         )
-                    await asyncio.sleep(1.5)
+                    await asyncio.sleep(0.1)
 
             await status_msg.delete()
 
