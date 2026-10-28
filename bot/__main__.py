@@ -22,6 +22,7 @@ async def run_bot() -> None:
         plugins={
             "root": "bot/plugins",
         },
+        max_concurrent_transmissions=6,
     )
 
     loop = asyncio.get_running_loop()
