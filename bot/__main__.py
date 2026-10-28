@@ -24,6 +24,7 @@ async def run_bot() -> None:
         },
         workers=8,
         max_concurrent_transmissions=6,
+        ipv6=False,
     )
 
     loop = asyncio.get_running_loop()
