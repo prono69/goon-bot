@@ -12,3 +12,4 @@ python-dotenv
 html-telegraph-poster
 lxml_html_clean
 gallery-dl
+niquests
