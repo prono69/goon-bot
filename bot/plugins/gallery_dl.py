@@ -30,7 +30,7 @@ COOKIES_FILE = Path("./gdl-cookies.txt")
 CONFIG_FILE = Path("./gallery-dl.conf")
 
 MAX_CONCURRENT_JOBS = 2          # Maximum simultaneous download jobs
-MAX_FILES_PER_JOB = 1000          # Safety cap to prevent disk exhaustion
+MAX_FILES_PER_JOB = 1000         # Safety cap to prevent disk exhaustion
 TG_MAX_FILE_SIZE = 2000 * 1024 * 1024  # Standard 2GB limit
 
 DOWNLOAD_BASE_DIR.mkdir(parents=True, exist_ok=True)
@@ -44,6 +44,8 @@ VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov"}
 GIF_EXTS = {".gif"}
 
 URL_REGEX = re.compile(r"https?://\S+")
+PIXIV_REGEX = re.compile(r"https?://(?:www\.)?pixiv\.net/\S+", re.IGNORECASE)
+
 
 
 # ==================== HELPER UTILITIES ====================
@@ -141,10 +143,11 @@ def create_zip_sync(source_dir: Path, output_zip: Path) -> Path:
     return output_zip
 
 
-async def probe_gallery_fast(url: str, range_opt: str = None) -> Tuple[int, int, str]:
+async def probe_gallery_fast(url: str, range_opt: str = None) -> Tuple[int, int, str, str]:
     """
     Simulates extraction via gallery-dl -j to discover file count,
     cumulative size (if available), and dynamic gallery name.
+    Returns: (file_count, total_bytes, gallery_name, raw_error)
     """
     cmd = [
         "gallery-dl",
@@ -163,11 +166,12 @@ async def probe_gallery_fast(url: str, range_opt: str = None) -> Tuple[int, int,
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
     )
 
-    stdout_bytes, _ = await proc.communicate()
+    stdout_bytes, stderr_bytes = await proc.communicate()
     raw_output = stdout_bytes.decode("utf-8", errors="ignore").strip()
+    raw_error = stderr_bytes.decode("utf-8", errors="ignore").strip()
 
     file_count = 0
     total_bytes = 0
@@ -175,9 +179,9 @@ async def probe_gallery_fast(url: str, range_opt: str = None) -> Tuple[int, int,
     known_album_count = 0
 
     if not raw_output:
-        return 0, 0, sanitize_filename(urlparse(url).path.strip("/").split("/")[-1] or "Gallery")
+        fallback_title = sanitize_filename(urlparse(url).path.strip("/").split("/")[-1] or "Gallery")
+        return 0, 0, fallback_title, raw_error
 
-    # 1. Try parsing full JSON payload (gallery-dl -j dumps an entire JSON array)
     records = []
     try:
         parsed = json.loads(raw_output)
@@ -186,7 +190,6 @@ async def probe_gallery_fast(url: str, range_opt: str = None) -> Tuple[int, int,
         elif isinstance(parsed, dict):
             records = [parsed]
     except Exception:
-        # Fallback for NDJSON (line by line)
         for line in raw_output.splitlines():
             line = line.strip()
             if not line:
@@ -197,11 +200,9 @@ async def probe_gallery_fast(url: str, range_opt: str = None) -> Tuple[int, int,
             except Exception:
                 continue
 
-    # 2. Iterate through parsed records
     for data in records:
         if isinstance(data, list) and len(data) >= 2:
             msg_type = data[0]
-            # Candidate metadata dict is typically at index 1 or index -1
             candidate = data[-1] if isinstance(data[-1], dict) else (data[1] if isinstance(data[1], dict) else None)
 
             if isinstance(candidate, dict):
@@ -214,10 +215,7 @@ async def probe_gallery_fast(url: str, range_opt: str = None) -> Tuple[int, int,
                 if isinstance(cnt, int) and cnt > known_album_count:
                     known_album_count = cnt
 
-            # Type 2, 3: direct media items
-            # Type 6: sub-item / pagination URLs (Fapello, Cyberdrop, Kemono, etc.)
             if msg_type in (2, 3, 6):
-                # Type 2 with an info dict at index 1 is usually the root album header
                 if msg_type == 2 and isinstance(data[1], dict):
                     pass
                 else:
@@ -240,7 +238,7 @@ async def probe_gallery_fast(url: str, range_opt: str = None) -> Tuple[int, int,
         file_count = known_album_count
 
     gallery_name = extract_custom_title(extracted_meta, url)
-    return file_count, total_bytes, gallery_name
+    return file_count, total_bytes, gallery_name, raw_error
 
 
 async def run_gallery_dl(url: str, dest_dir: Path, status_msg: Message, range_opt: str = None) -> Tuple[int, str]:
@@ -299,20 +297,36 @@ async def run_gallery_dl(url: str, dest_dir: Path, status_msg: Message, range_op
 
 # ==================== COMMAND HANDLERS ====================
 
-@Client.on_message(filters.command(["gdl", "dl"]) & (filters.private | filters.group))
+@Client.on_message(
+    (
+        filters.command(["gdl", "dl"])
+        | (filters.text & filters.regex(PIXIV_REGEX))
+    )
+    & (filters.private | filters.group)
+)
 async def gdl_command_handler(client: Client, message: Message):
-    """Entry point: /gdl <url> [-r 1-20]"""
+    """Entry point: /gdl <url>, /dl <url>, or direct Pixiv URL."""
     text = message.text or ""
-    urls = URL_REGEX.findall(text)
+    
+    # First priority: check if message contains a Pixiv URL
+    pixiv_urls = PIXIV_REGEX.findall(text)
+    if pixiv_urls:
+        urls = pixiv_urls
+    else:
+        # Fallback to general URL extraction if triggered via /gdl
+        urls = URL_REGEX.findall(text)
 
+    # Check replied message if command was sent as a reply
     if not urls and message.reply_to_message:
         reply_text = message.reply_to_message.text or message.reply_to_message.caption or ""
-        urls = URL_REGEX.findall(reply_text)
+        urls = PIXIV_REGEX.findall(reply_text) or URL_REGEX.findall(reply_text)
 
+    # If it was triggered via /gdl without any link, show usage
     if not urls:
         return await message.reply_text(
             "❌ **Please provide a valid URL!**\n\n"
             "**Usage:**\n"
+            "• Send any Pixiv link directly into the chat.\n"
             "• `/gdl https://example.com/gallery`\n"
             "• `/gdl -r 1-15 https://example.com/gallery` *(Download items 1 to 15)*\n"
             "• Reply `/gdl` to a message containing a URL.\n\n"
@@ -326,12 +340,13 @@ async def gdl_command_handler(client: Client, message: Message):
 
     probing_msg = await message.reply_text("🔎 **Inspecting gallery link...**")
 
-    file_count, total_bytes, gallery_name = await probe_gallery_fast(url, range_opt)
+    file_count, total_bytes, gallery_name, raw_error = await probe_gallery_fast(url, range_opt)
 
     if file_count == 0:
+        err_msg = f"\n\n**Details:**\n`{raw_error[-350:]}`" if raw_error else ""
         return await probing_msg.edit_text(
-            "❌ **Could not find any downloadable media!**\n"
-            "The link might be private, require login (`/setcookies`), or is not supported by gallery-dl."
+            f"❌ **Could not find any downloadable media!**\n"
+            f"The link might be private, require login (`/setcookies`), or is not supported by gallery-dl.{err_msg}"
         )
 
     session_id = f"{message.chat.id}_{message.id}"
@@ -363,8 +378,8 @@ async def gdl_command_handler(client: Client, message: Message):
         f"📦 **Estimated Size:** `{size_display}`\n\n"
         "How would you like to receive this gallery?",
         reply_markup=keyboard,
-        #disable_web_page_preview=True,
     )
+
 
 
 @Client.on_message(filters.command("setcookies") & filters.reply)
@@ -375,7 +390,7 @@ async def set_cookies_handler(client: Client, message: Message):
         return await message.reply_text("❌ Please reply to a valid Netscape format `cookies.txt` file.")
 
     await message.reply_to_message.download(file_name=str(COOKIES_FILE.resolve()))
-    await message.reply_text("✅ `cookies.txt` saved. It will now be applied to future downloads!")
+    await message.reply_text(f"✅ `{COOKIES_FILE.name}` saved. It will now be applied to future downloads!")
 
 
 # ==================== CALLBACK QUERY DISPATCHER ====================
@@ -410,7 +425,6 @@ async def gdl_callback_handler(client: Client, query: CallbackQuery):
 
             ret_code, stderr_out = await run_gallery_dl(url, job_dir, status_msg, range_opt)
 
-            # Filter out JSON metadata files
             all_files: List[Path] = sorted(
                 [p for p in job_dir.rglob("*") if p.is_file() and not p.name.endswith(".json")]
             )
@@ -421,7 +435,6 @@ async def gdl_callback_handler(client: Client, query: CallbackQuery):
                     f"❌ **Download Failed!**\n\n`{err_snippet}`"
                 )
 
-            # Re-read downloaded JSON metadata to get finalized artist and site details
             json_files = list(job_dir.rglob("*.json"))
             meta = {}
             if json_files:
@@ -432,7 +445,6 @@ async def gdl_callback_handler(client: Client, query: CallbackQuery):
                     pass
 
             gallery_name = extract_custom_title(meta, url) if meta else preset_name
-            caption = f"🏷️ **{gallery_name}**\n🔗 [Source URL]({url})"
             total_files = len(all_files)
 
             # -------------------- MODE 1: ZIP ARCHIVE --------------------
@@ -467,21 +479,30 @@ async def gdl_callback_handler(client: Client, query: CallbackQuery):
             # -------------------- MODE 2: UNCOMPRESSED DOCUMENTS --------------------
             elif action == "gdl_doc":
                 await status_msg.edit_text(f"📤 **Uploading {total_files} files as raw documents...**")
+                total_batches = (total_files + 9) // 10
+
                 for i in range(0, total_files, 10):
                     batch = all_files[i : i + 10]
+                    batch_num = (i // 10) + 1
+
+                    part_info = f" `[{batch_num}/{total_batches}]`" if total_batches > 1 else ""
+                    batch_caption = f"🏷️ **{gallery_name}**{part_info}\n🔗 [Source URL]({url})"
+
                     if len(batch) == 1:
                         await safe_tg_call(
                             client.send_document,
                             chat_id=query.message.chat.id,
                             document=str(batch[0]),
-                            caption=caption if i == 0 else None,
+                            caption=batch_caption,
                             reply_to_message_id=query.message.reply_to_message_id,
                         )
                     else:
+                        last_idx = len(batch) - 1
                         media_group = [
                             InputMediaDocument(
                                 media=str(f),
-                                caption=caption if (i == 0 and idx == 0) else ""
+                                # Attach caption strictly to the bottom item of this batch
+                                caption=batch_caption if idx == last_idx else ""
                             )
                             for idx, f in enumerate(batch)
                         ]
@@ -512,22 +533,28 @@ async def gdl_callback_handler(client: Client, query: CallbackQuery):
                     else:
                         singles.append(file_path)
 
+                total_album_batches = (len(album_items) + 9) // 10
+
                 # Send albums in chunks of 10
                 for i in range(0, len(album_items), 10):
                     chunk = album_items[i : i + 10]
+                    batch_num = (i // 10) + 1
+
+                    part_info = f" `[{batch_num}/{total_album_batches}]`" if total_album_batches > 1 else ""
+                    batch_caption = f"🏷️ **{gallery_name}**{part_info}\n🔗 [Source URL]({url})"
+
                     await status_msg.edit_text(
                         f"📤 **Uploading media ({min(i + 10, len(album_items))}/{len(album_items)})...**"
                     )
 
                     if len(chunk) == 1:
                         m_type, f_path = chunk[0]
-                        cap = caption if i == 0 else None
                         if m_type == "photo":
                             await safe_tg_call(
                                 client.send_photo,
                                 chat_id=query.message.chat.id,
                                 photo=str(f_path),
-                                caption=cap,
+                                caption=batch_caption,
                                 reply_to_message_id=query.message.reply_to_message_id,
                             )
                         else:
@@ -535,13 +562,15 @@ async def gdl_callback_handler(client: Client, query: CallbackQuery):
                                 client.send_video,
                                 chat_id=query.message.chat.id,
                                 video=str(f_path),
-                                caption=cap,
+                                caption=batch_caption,
                                 reply_to_message_id=query.message.reply_to_message_id,
                             )
                     else:
+                        last_idx = len(chunk) - 1
                         media_group = []
                         for idx, (m_type, f_path) in enumerate(chunk):
-                            cap = caption if (i == 0 and idx == 0) else ""
+                            # Put caption on the LAST item of EVERY chunk so it stays anchored at the bottom
+                            cap = batch_caption if idx == last_idx else ""
                             if m_type == "photo":
                                 media_group.append(InputMediaPhoto(media=str(f_path), caption=cap))
                             else:
@@ -555,24 +584,24 @@ async def gdl_callback_handler(client: Client, query: CallbackQuery):
                                 reply_to_message_id=query.message.reply_to_message_id,
                             )
                         except (MediaEmpty, WebpageCurlFailed):
-                            # Fallback to document delivery if an image has unparseable headers
-                            for _, f_path in chunk:
+                            for idx_f, (_, f_path) in enumerate(chunk):
                                 await safe_tg_call(
                                     client.send_document,
                                     chat_id=query.message.chat.id,
                                     document=str(f_path),
+                                    caption=batch_caption if idx_f == len(chunk) - 1 else None,
                                 )
                     await asyncio.sleep(2)
 
-                # Upload GIFs or oversized standalone images
+                # Standalone single items (GIFs or oversized >10MB images)
                 for idx, f_path in enumerate(singles):
-                    cap = caption if (not album_items and idx == 0) else None
+                    single_caption = f"🏷️ **{gallery_name}**\n🔗 [Source URL]({url})"
                     if f_path.suffix.lower() in GIF_EXTS:
                         await safe_tg_call(
                             client.send_animation,
                             chat_id=query.message.chat.id,
                             animation=str(f_path),
-                            caption=cap,
+                            caption=single_caption,
                             reply_to_message_id=query.message.reply_to_message_id,
                         )
                     else:
@@ -580,7 +609,7 @@ async def gdl_callback_handler(client: Client, query: CallbackQuery):
                             client.send_document,
                             chat_id=query.message.chat.id,
                             document=str(f_path),
-                            caption=cap,
+                            caption=single_caption,
                             reply_to_message_id=query.message.reply_to_message_id,
                         )
                     await asyncio.sleep(1.5)
