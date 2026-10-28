@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # ==================== CONFIGURATION ====================
 DOWNLOAD_BASE_DIR = Path("./downloads/gallery_dl")
-COOKIES_FILE = Path("./cookies.txt")
+COOKIES_FILE = Path("./pix-cookies.txt")
 CONFIG_FILE = Path("./gallery-dl.conf")
 
 MAX_CONCURRENT_JOBS = 2          # Maximum simultaneous download jobs
