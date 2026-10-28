@@ -151,6 +151,7 @@ async def probe_gallery_fast(url: str, range_opt: str = None) -> Tuple[int, int,
     """
     Simulates extraction via gallery-dl -j to discover file count,
     cumulative size (if available), and dynamic gallery name.
+    Returns: (file_count, total_bytes, gallery_name, raw_error)
     """
     cmd = [
         "gallery-dl",
@@ -310,7 +311,7 @@ async def run_gallery_dl(url: str, dest_dir: Path, status_msg: Message, range_op
 async def gdl_command_handler(client: Client, message: Message):
     """Entry point: /gdl <url>, /dl <url>, or direct Pixiv URL."""
     text = message.text or ""
-    
+
     pixiv_urls = PIXIV_REGEX.findall(text)
     if pixiv_urls:
         urls = pixiv_urls
@@ -494,17 +495,14 @@ async def gdl_callback_handler(client: Client, query: CallbackQuery):
                             reply_to_message_id=query.message.reply_to_message_id,
                         )
                     else:
-                        # Pre-upload files concurrently via client.save_file to prevent MTProto sequential lag
-                        uploaded_files = await asyncio.gather(
-                            *[safe_tg_call(client.save_file, str(f)) for f in batch]
-                        )
                         last_idx = len(batch) - 1
                         media_group = [
                             InputMediaDocument(
-                                media=uploaded_files[idx],
+                                media=str(f),
+                                # Attach caption strictly to the bottom item of this batch
                                 caption=batch_caption if idx == last_idx else ""
                             )
-                            for idx in range(len(batch))
+                            for idx, f in enumerate(batch)
                         ]
                         await safe_tg_call(
                             client.send_media_group,
@@ -512,7 +510,7 @@ async def gdl_callback_handler(client: Client, query: CallbackQuery):
                             media=media_group,
                             reply_to_message_id=query.message.reply_to_message_id,
                         )
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.5)
 
             # -------------------- MODE 3: NORMAL MEDIA / ALBUMS --------------------
             elif action == "gdl_norm":
@@ -525,6 +523,7 @@ async def gdl_callback_handler(client: Client, query: CallbackQuery):
                     ext = file_path.suffix.lower()
                     f_size = file_path.stat().st_size
 
+                    # Telegram has a 10MB limit for compressed send_photo
                     if ext in IMAGE_EXTS and f_size <= 10 * 1024 * 1024:
                         album_items.append(("photo", file_path))
                     elif ext in VIDEO_EXTS and f_size <= TG_MAX_FILE_SIZE:
@@ -565,18 +564,15 @@ async def gdl_callback_handler(client: Client, query: CallbackQuery):
                                 reply_to_message_id=query.message.reply_to_message_id,
                             )
                     else:
-                        # Parallel pre-upload of the album batch
-                        uploaded_files = await asyncio.gather(
-                            *[safe_tg_call(client.save_file, str(f_path)) for _, f_path in chunk]
-                        )
                         last_idx = len(chunk) - 1
                         media_group = []
-                        for idx, (m_type, _) in enumerate(chunk):
+                        for idx, (m_type, f_path) in enumerate(chunk):
+                            # Put caption on the LAST item of EVERY chunk so it stays anchored at the bottom
                             cap = batch_caption if idx == last_idx else ""
                             if m_type == "photo":
-                                media_group.append(InputMediaPhoto(media=uploaded_files[idx], caption=cap))
+                                media_group.append(InputMediaPhoto(media=str(f_path), caption=cap))
                             else:
-                                media_group.append(InputMediaVideo(media=uploaded_files[idx], caption=cap))
+                                media_group.append(InputMediaVideo(media=str(f_path), caption=cap))
 
                         try:
                             await safe_tg_call(
@@ -593,7 +589,7 @@ async def gdl_callback_handler(client: Client, query: CallbackQuery):
                                     document=str(f_path),
                                     caption=batch_caption if idx_f == len(chunk) - 1 else None,
                                 )
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.5)
 
                 # Standalone single items (GIFs or oversized >10MB images)
                 for idx, f_path in enumerate(singles):
@@ -614,7 +610,7 @@ async def gdl_callback_handler(client: Client, query: CallbackQuery):
                             caption=single_caption,
                             reply_to_message_id=query.message.reply_to_message_id,
                         )
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.5)
 
             await status_msg.delete()
 

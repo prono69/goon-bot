@@ -22,6 +22,7 @@ async def run_bot() -> None:
         plugins={
             "root": "bot/plugins",
         },
+        workers=8,
         max_concurrent_transmissions=6,
     )
 
