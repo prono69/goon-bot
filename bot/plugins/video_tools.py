@@ -8,6 +8,7 @@ import logging
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from PIL import Image
+from aiohttp import web
 
 from pyrogram import Client, filters
 from pyrogram.types import (
@@ -20,17 +21,128 @@ from pyrogram.errors import FloodWait, MessageNotModified
 
 logger = logging.getLogger(__name__)
 
-# Temporary directory for generated files
+# Temporary directory for generated output files
 TEMP_DIR = Path("./downloads/video_tools")
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
 # State storage for user sessions
-# Format: { f"{chat_id}_{message_id}": { ...data... } }
 VIDEO_SESSIONS: Dict[str, Dict[str, Any]] = {}
 
-# Keep track of active tasks per user to avoid spamming
+# Active stream jobs: { job_token: { "client": client, "message": message, "file_size": int, "mime_type": str } }
+STREAM_JOBS: Dict[str, Dict[str, Any]] = {}
+
+# Active users to prevent concurrent spam
 ACTIVE_USERS: set = set()
 
+# Internal local HTTP server state
+HTTP_SERVER_RUNNER: Optional[web.AppRunner] = None
+HTTP_SERVER_PORT = 19485
+
+
+# ==================== LOCAL HTTP RANGE STREAMER ====================
+
+async def handle_stream(request: web.Request) -> web.StreamResponse:
+    """Handles HTTP GET and HEAD requests with Range header support for ffmpeg seeking."""
+    job_token = request.match_info.get("token")
+    job = STREAM_JOBS.get(job_token)
+    if not job:
+        return web.Response(status=404, text="Stream not found")
+
+    client: Client = job["client"]
+    message: Message = job["message"]
+    file_size: int = job["file_size"]
+    mime_type: str = job.get("mime_type", "video/mp4")
+
+    range_header = request.headers.get("Range")
+    from_bytes = 0
+    until_bytes = file_size - 1
+
+    if range_header:
+        # Format: bytes=start-end or bytes=start-
+        try:
+            ranges = range_header.replace("bytes=", "").split("-")
+            from_bytes = int(ranges[0])
+            if ranges[1]:
+                until_bytes = int(ranges[1])
+        except Exception:
+            from_bytes = 0
+
+    from_bytes = max(0, min(from_bytes, file_size - 1))
+    until_bytes = max(from_bytes, min(until_bytes, file_size - 1))
+    req_length = (until_bytes - from_bytes) + 1
+
+    headers = {
+        "Content-Type": mime_type,
+        "Accept-Ranges": "bytes",
+        "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
+        "Content-Length": str(req_length),
+    }
+
+    status_code = 206 if range_header else 200
+    response = web.StreamResponse(status=status_code, headers=headers)
+    await response.prepare(request)
+
+    if request.method == "HEAD":
+        return response
+
+    # Stream requested byte range from Telegram MTProto
+    try:
+        # In Pyrogram / Kurigram, offset is given in 1MB chunks (or chunk offset)
+        # stream_media(message, offset=..., limit=...)
+        # offset is the chunk index (1 chunk = 1MB = 1048576 bytes)
+        chunk_size = 1024 * 1024
+        start_chunk = from_bytes // chunk_size
+        end_chunk = until_bytes // chunk_size
+        limit_chunks = (end_chunk - start_chunk) + 1
+
+        bytes_to_skip = from_bytes % chunk_size
+        bytes_left = req_length
+
+        async for chunk in client.stream_media(message, offset=start_chunk, limit=limit_chunks):
+            if bytes_to_skip > 0:
+                if len(chunk) <= bytes_to_skip:
+                    bytes_to_skip -= len(chunk)
+                    continue
+                chunk = chunk[bytes_to_skip:]
+                bytes_to_skip = 0
+
+            if len(chunk) > bytes_left:
+                chunk = chunk[:bytes_left]
+
+            if chunk:
+                await response.write(chunk)
+                bytes_left -= len(chunk)
+
+            if bytes_left <= 0:
+                break
+
+    except (asyncio.CancelledError, ConnectionResetError, BrokenPipeError):
+        pass
+    except Exception as e:
+        logger.warning(f"Streaming error for job {job_token}: {e}")
+
+    return response
+
+
+async def ensure_http_server():
+    """Starts the internal localhost HTTP streaming server if not already running."""
+    global HTTP_SERVER_RUNNER
+    if HTTP_SERVER_RUNNER is not None:
+        return
+
+    app = web.Application()
+    app.router.add_get("/stream/{token}", handle_stream)
+    app.router.add_head("/stream/{token}", handle_stream)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", HTTP_SERVER_PORT)
+    await site.start()
+    HTTP_SERVER_RUNNER = runner
+    logger.info(f"Internal Video Stream Server listening on http://127.0.0.1:{HTTP_SERVER_PORT}")
+
+
+# ==================== HELPERS ====================
 
 def get_video_info_from_message(message: Message) -> Optional[Dict[str, Any]]:
     """Check if message has a video or a video-like document."""
@@ -41,7 +153,7 @@ def get_video_info_from_message(message: Message) -> Optional[Dict[str, Any]]:
             "file_id": video.file_id,
             "file_name": video.file_name or f"video_{video.file_unique_id}.mp4",
             "file_size": video.file_size or 0,
-            "duration": video.duration or 0,
+            "duration": int(video.duration or 0),
             "width": video.width or 1280,
             "height": video.height or 720,
             "mime_type": video.mime_type or "video/mp4",
@@ -58,7 +170,7 @@ def get_video_info_from_message(message: Message) -> Optional[Dict[str, Any]]:
                 "file_id": doc.file_id,
                 "file_name": doc.file_name or f"video_{doc.file_unique_id}.mp4",
                 "file_size": doc.file_size or 0,
-                "duration": 0,  # Documents might not have duration metadata
+                "duration": 0,
                 "width": 1280,
                 "height": 720,
                 "mime_type": mime or "video/mp4",
@@ -66,48 +178,8 @@ def get_video_info_from_message(message: Message) -> Optional[Dict[str, Any]]:
     return None
 
 
-async def probe_duration_with_ffprobe(pipe_reader: asyncio.StreamReader) -> float:
-    """Read duration from ffprobe using streaming input."""
-    # ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 -i pipe:0
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "ffprobe",
-            "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            "-i", "pipe:0",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        # We can't pass the StreamReader directly to stdin without piping tasks
-        return 0.0
-    except Exception:
-        return 0.0
-
-
-async def pipe_stream_to_ffmpeg(stream_gen, stdin_writer: asyncio.StreamWriter):
-    """Pipes chunks from client.stream_media() into ffmpeg stdin."""
-    try:
-        async for chunk in stream_gen:
-            if stdin_writer.is_closing():
-                break
-            stdin_writer.write(chunk)
-            await stdin_writer.drain()
-    except (asyncio.CancelledError, BrokenPipeError, ConnectionResetError):
-        pass
-    except Exception as e:
-        logger.warning(f"Error while feeding stream to ffmpeg stdin: {e}")
-    finally:
-        try:
-            stdin_writer.close()
-            await stdin_writer.wait_closed()
-        except Exception:
-            pass
-
-
-async def get_stream_duration(client: Client, message: Message, fallback_duration: int = 0) -> float:
-    """Obtain duration from video metadata or by reading the container header with ffprobe."""
+async def probe_stream_duration(stream_url: str, fallback_duration: int = 0) -> float:
+    """Reads accurate duration from the local stream URL using ffprobe."""
     if fallback_duration > 0:
         return float(fallback_duration)
 
@@ -117,20 +189,16 @@ async def get_stream_duration(client: Client, message: Message, fallback_duratio
             "-v", "error",
             "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1",
-            "-i", "pipe:0",
-            stdin=asyncio.subprocess.PIPE,
+            stream_url,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stream_gen = client.stream_media(message, limit=10) # stream first few chunks (e.g. 10 * 1MB)
-        pipe_task = asyncio.create_task(pipe_stream_to_ffmpeg(stream_gen, proc.stdin))
-        stdout, _ = await proc.communicate()
-        await pipe_task
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
         dur_str = stdout.decode().strip()
         if dur_str:
             return float(dur_str)
     except Exception as e:
-        logger.warning(f"Could not probe duration via ffprobe: {e}")
+        logger.warning(f"Could not probe duration from {stream_url}: {e}")
 
     return 0.0
 
@@ -157,15 +225,12 @@ def create_collage(image_paths: List[Path], output_path: Path, title: str = "") 
     else:  # 10
         cols, rows = 5, 2
 
-    # Standardize image size for each cell
     cell_w, cell_h = 480, 270  # 16:9 ratio thumbnail
     margin = 12
-    header_height = 40 if title else 0
 
     total_w = cols * cell_w + (cols + 1) * margin
-    total_h = rows * cell_h + (rows + 1) * margin + header_height
+    total_h = rows * cell_h + (rows + 1) * margin
 
-    # Create dark-themed collage canvas
     collage = Image.new("RGB", (total_w, total_h), color=(20, 24, 30))
 
     idx = 0
@@ -174,19 +239,16 @@ def create_collage(image_paths: List[Path], output_path: Path, title: str = "") 
             if idx >= num_images:
                 break
             img = images[idx]
-            # Resize keeping aspect ratio, crop to fill cell
             img_ratio = img.width / img.height
             target_ratio = cell_w / cell_h
 
             if img_ratio > target_ratio:
-                # Wider: scale by height then crop width
                 new_h = cell_h
                 new_w = int(img.width * (cell_h / img.height))
                 resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
                 crop_x = (new_w - cell_w) // 2
                 cropped = resized.crop((crop_x, 0, crop_x + cell_w, cell_h))
             else:
-                # Taller: scale by width then crop height
                 new_w = cell_w
                 new_h = int(img.height * (cell_w / img.width))
                 resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
@@ -194,7 +256,7 @@ def create_collage(image_paths: List[Path], output_path: Path, title: str = "") 
                 cropped = resized.crop((0, crop_y, cell_w, crop_y + cell_h))
 
             x = margin + c * (cell_w + margin)
-            y = header_height + margin + r * (cell_h + margin)
+            y = margin + r * (cell_h + margin)
             collage.paste(cropped, (x, y))
             idx += 1
 
@@ -256,15 +318,9 @@ async def video_receive_handler(client: Client, message: Message):
 @Client.on_callback_query(filters.regex(r"^vtool:"))
 async def video_tool_callback(client: Client, callback: CallbackQuery):
     """Handles button interactions for sample generation and screenshot collage."""
-    data = callback.data.split(":")
-    action = data[1]
-    session_key = f"{data[2]}:{data[3]}" if len(data) > 3 and not data[2].startswith("-") and "_" not in data[2] else data[2]
-    # For safety, reconstruct session_key from parts:
-    # "vtool:action:chat_id_msg_id" or "vtool:shots_num:chat_id_msg_id:count"
-    
     parts = callback.data.split(":")
     action = parts[1]
-    
+
     if action == "close":
         await callback.message.delete()
         session_key = parts[2]
@@ -361,40 +417,46 @@ async def video_tool_callback(client: Client, callback: CallbackQuery):
 # ==================== STREAM PROCESSING TASKS ====================
 
 async def process_sample_video(client: Client, callback: CallbackQuery, session: Dict[str, Any]):
-    """Streams video via pyrogram, trims 30 seconds via ffmpeg without downloading full file, and sends result."""
+    """Streams video via local HTTP range server, trims 30 seconds via ffmpeg without full download, and sends result."""
     user_id = callback.from_user.id
-    status_msg = await callback.edit_message_text("⚡ **Streaming video to generate 30s sample...**")
+    status_msg = await callback.edit_message_text("⚡ **Preparing stream for 30s sample...**")
     chat_id = session["chat_id"]
     msg_id = session["message_id"]
 
     sample_output = TEMP_DIR / f"sample_{user_id}_{int(time.time())}.mp4"
     sample_thumb = TEMP_DIR / f"thumb_{user_id}_{int(time.time())}.jpg"
+    job_token = f"sample_{user_id}_{int(time.time())}"
 
     try:
-        # Retrieve target original message
+        await ensure_http_server()
         target_message = await client.get_messages(chat_id, msg_id)
         if not target_message:
             await status_msg.edit_text("❌ Could not find original message.")
             return
 
-        # Figure out duration and start offset
-        duration = await get_stream_duration(client, target_message, session["video_info"].get("duration", 0))
-        
-        # Decide starting point: if video is >= 60s, take 30s from the middle or 10s in
+        # Register streaming job
+        STREAM_JOBS[job_token] = {
+            "client": client,
+            "message": target_message,
+            "file_size": session["video_info"]["file_size"],
+            "mime_type": session["video_info"].get("mime_type", "video/mp4"),
+        }
+
+        stream_url = f"http://127.0.0.1:{HTTP_SERVER_PORT}/stream/{job_token}"
+        await status_msg.edit_text("⚡ **Streaming video to generate 30s sample...**")
+
+        # Determine start time (seek point)
+        duration = await probe_stream_duration(stream_url, session["video_info"].get("duration", 0))
         start_time = 0
         if duration > 45:
             start_time = min(30, int(duration / 3))
 
-        # Launch ffmpeg process reading from pipe:0 and writing to sample_output
-        # -ss start_time before or after -i pipe:0
-        # For pipe input, -ss before -i seeks by decoding/skipping or after -i trims stream.
-        # -t 30 gives a 30s cut.
-        # We re-encode fast with ultrafast or copy if possible. Fast re-encode is safest across codecs.
+        # FFmpeg reads directly from local HTTP URL with seeking support
         ffmpeg_cmd = [
             "ffmpeg",
             "-y",
-            "-i", "pipe:0",
             "-ss", str(start_time),
+            "-i", stream_url,
             "-t", "30",
             "-c:v", "libx264",
             "-preset", "ultrafast",
@@ -405,21 +467,14 @@ async def process_sample_video(client: Client, callback: CallbackQuery, session:
             str(sample_output),
         ]
 
-        logger.info(f"Running ffmpeg for 30s sample: {' '.join(ffmpeg_cmd)}")
+        logger.info(f"Running ffmpeg sample command: {' '.join(ffmpeg_cmd)}")
         proc = await asyncio.create_subprocess_exec(
             *ffmpeg_cmd,
-            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
 
-        # Stream media from Pyrogram into ffmpeg stdin
-        stream_gen = client.stream_media(target_message)
-        pipe_task = asyncio.create_task(pipe_stream_to_ffmpeg(stream_gen, proc.stdin))
-
-        # Wait for ffmpeg to complete
-        _, stderr_data = await proc.communicate()
-        await pipe_task
+        _, stderr_data = await asyncio.wait_for(proc.communicate(), timeout=180)
 
         if not sample_output.exists() or sample_output.stat().st_size == 0:
             err_msg = stderr_data.decode(errors="replace")[-300:]
@@ -427,7 +482,7 @@ async def process_sample_video(client: Client, callback: CallbackQuery, session:
             await status_msg.edit_text(f"❌ **Failed to generate sample video.**\n`{err_msg}`")
             return
 
-        # Generate thumbnail for the sample video
+        # Generate thumbnail for the sample
         thumb_cmd = [
             "ffmpeg",
             "-y",
@@ -439,7 +494,7 @@ async def process_sample_video(client: Client, callback: CallbackQuery, session:
         t_proc = await asyncio.create_subprocess_exec(*thumb_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
         await t_proc.wait()
 
-        # Send sample video to user
+        # Upload generated sample
         await status_msg.edit_text("📤 **Uploading 30-second sample video...**")
         await client.send_video(
             chat_id=chat_id,
@@ -451,11 +506,14 @@ async def process_sample_video(client: Client, callback: CallbackQuery, session:
         )
         await status_msg.delete()
 
+    except asyncio.TimeoutError:
+        await status_msg.edit_text("❌ **Timeout:** Video generation took too long.")
     except Exception as e:
         logger.exception("Error during sample video processing:")
         await status_msg.edit_text(f"❌ **Error generating sample:** `{e}`")
     finally:
         ACTIVE_USERS.discard(user_id)
+        STREAM_JOBS.pop(job_token, None)
         if sample_output.exists():
             sample_output.unlink(missing_ok=True)
         if sample_thumb.exists():
@@ -463,75 +521,70 @@ async def process_sample_video(client: Client, callback: CallbackQuery, session:
 
 
 async def process_screenshot_collage(client: Client, callback: CallbackQuery, session: Dict[str, Any], count: int):
-    """Streams video via pyrogram, extracts requested number of frames, builds a collage and sends it."""
+    """Streams video via local HTTP range server, captures screenshots, and creates a collage."""
     user_id = callback.from_user.id
     count = max(2, min(count, 10))
-    status_msg = await callback.edit_message_text(f"⚡ **Streaming video to capture {count} screenshots...**")
+    status_msg = await callback.edit_message_text(f"⚡ **Preparing stream to capture {count} screenshots...**")
     chat_id = session["chat_id"]
     msg_id = session["message_id"]
 
     work_dir = TEMP_DIR / f"shots_{user_id}_{int(time.time())}"
     work_dir.mkdir(parents=True, exist_ok=True)
     collage_path = work_dir / "collage.jpg"
+    job_token = f"shots_{user_id}_{int(time.time())}"
 
     try:
+        await ensure_http_server()
         target_message = await client.get_messages(chat_id, msg_id)
         if not target_message:
             await status_msg.edit_text("❌ Could not find original message.")
             return
 
-        # Figure out duration
-        duration = await get_stream_duration(client, target_message, session["video_info"].get("duration", 0))
+        # Register streaming job
+        STREAM_JOBS[job_token] = {
+            "client": client,
+            "message": target_message,
+            "file_size": session["video_info"]["file_size"],
+            "mime_type": session["video_info"].get("mime_type", "video/mp4"),
+        }
+
+        stream_url = f"http://127.0.0.1:{HTTP_SERVER_PORT}/stream/{job_token}"
+        await status_msg.edit_text(f"⚡ **Streaming video to capture {count} screenshots...**")
+
+        # Determine duration
+        duration = await probe_stream_duration(stream_url, session["video_info"].get("duration", 0))
         if duration <= 0:
-            duration = 120.0  # fallback assumption 2 minutes
+            duration = 120.0
 
-        # Calculate evenly spaced intervals across the video
-        # E.g. for duration 100 and count 5 -> intervals at 10, 30, 50, 70, 90
+        # Extract frames evenly spaced across duration
         step = duration / (count + 1)
-        timestamps = [step * (i + 1) for i in range(count)]
+        frames: List[Path] = []
 
-        # Extract frames using ffmpeg fps or select filter
-        # Using select filter: select='eq(n\,...)' or extracting via fps
-        # To make it fastest over pipe without seeking issues, we can extract `count` frames evenly:
-        # ffmpeg -i pipe:0 -vf "thumbnail,scale=640:-1" -vframes count
-        # Or even better: -vf "fps=count/duration" or select expression:
-        # A very robust way for piped streams is to sample 1 frame every (duration / count) seconds:
-        fps_rate = count / max(duration, 1.0)
-        out_pattern = str(work_dir / "frame_%02d.jpg")
+        # Seek and extract each frame individually using HTTP range seeking
+        for i in range(count):
+            target_sec = step * (i + 1)
+            frame_file = work_dir / f"frame_{i:02d}.jpg"
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-ss", f"{target_sec:.2f}",
+                "-i", stream_url,
+                "-vframes", "1",
+                "-q:v", "3",
+                str(frame_file)
+            ]
+            f_proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await asyncio.wait_for(f_proc.wait(), timeout=30)
+            if frame_file.exists() and frame_file.stat().st_size > 0:
+                frames.append(frame_file)
 
-        ffmpeg_cmd = [
-            "ffmpeg",
-            "-y",
-            "-i", "pipe:0",
-            "-vf", f"fps={fps_rate:.4f},scale=640:-1",
-            "-vframes", str(count),
-            "-q:v", "3",
-            out_pattern,
-        ]
-
-        logger.info(f"Running ffmpeg for screenshots: {' '.join(ffmpeg_cmd)}")
-        proc = await asyncio.create_subprocess_exec(
-            *ffmpeg_cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-
-        stream_gen = client.stream_media(target_message)
-        pipe_task = asyncio.create_task(pipe_stream_to_ffmpeg(stream_gen, proc.stdin))
-
-        _, stderr_data = await proc.communicate()
-        await pipe_task
-
-        frames = sorted(list(work_dir.glob("frame_*.jpg")))
         if not frames:
-            err_msg = stderr_data.decode(errors="replace")[-300:]
-            logger.error(f"FFmpeg screenshot extraction failed: {err_msg}")
-            await status_msg.edit_text(f"❌ **Failed to extract frames.**\n`{err_msg}`")
+            await status_msg.edit_text("❌ **Failed to extract frames from video stream.**")
             return
-
-        # Trim frames to requested count
-        frames = frames[:count]
 
         await status_msg.edit_text("🎨 **Creating collage...**")
         collage_file = create_collage(frames, collage_path, title=session["video_info"]["file_name"])
@@ -549,9 +602,12 @@ async def process_screenshot_collage(client: Client, callback: CallbackQuery, se
         )
         await status_msg.delete()
 
+    except asyncio.TimeoutError:
+        await status_msg.edit_text("❌ **Timeout:** Screenshot capture took too long.")
     except Exception as e:
         logger.exception("Error during screenshot collage processing:")
         await status_msg.edit_text(f"❌ **Error generating screenshots:** `{e}`")
     finally:
         ACTIVE_USERS.discard(user_id)
+        STREAM_JOBS.pop(job_token, None)
         shutil.rmtree(work_dir, ignore_errors=True)
