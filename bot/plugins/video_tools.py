@@ -132,7 +132,6 @@ async def ensure_http_server():
 
     app = web.Application()
     app.router.add_get("/stream/{token}", handle_stream)
-    app.router.add_head("/stream/{token}", handle_stream)
 
     runner = web.AppRunner(app)
     await runner.setup()
