@@ -2,6 +2,7 @@ import os
 import io
 import math
 import time
+import random
 import shutil
 import asyncio
 import logging
@@ -486,48 +487,77 @@ async def process_sample_video(client: Client, callback: CallbackQuery, session:
         stream_url = f"http://127.0.0.1:{HTTP_SERVER_PORT}/stream/{job_token}"
         await status_msg.edit_text("⚡ **Streaming video to generate 30s sample...**")
 
-        # Determine start time (seek point)
+        # Determine duration
         duration = await probe_stream_duration(stream_url, session["video_info"].get("duration", 0))
-        start_time = 0
-        if duration > 45:
-            start_time = min(30, int(duration / 3))
+        sample_duration = 30
 
-        end_time = min(start_time + 30, int(duration)) if duration > 0 else start_time + 30
+        # Calculate a realistic, randomized start time across the video
+        if duration > sample_duration + 10:
+            # Pick a random point between 5% of video and (95% - sample_duration)
+            min_start = max(5.0, duration * 0.05)
+            max_start = max(min_start, (duration * 0.95) - sample_duration)
+            start_time = int(random.uniform(min_start, max_start))
+        elif duration > sample_duration:
+            start_time = int(random.uniform(0, duration - sample_duration))
+        else:
+            start_time = 0
+
+        end_time = min(start_time + sample_duration, int(duration)) if duration > 0 else start_time + sample_duration
         actual_sample_dur = max(1, end_time - start_time)
         timestamp_range = f"{format_timestamp(start_time)} - {format_timestamp(end_time)}"
 
-        # Optimized FFmpeg command: fast input seek + multithreading + ultrafast preset
-        ffmpeg_cmd = [
+        # Try ultra-fast stream copy (-c copy) first without re-encoding!
+        # This is instantaneous and takes only ~1-2 seconds.
+        fast_cmd = [
             "ffmpeg",
             "-y",
             "-ss", str(start_time),
             "-i", stream_url,
             "-t", str(actual_sample_dur),
-            "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-tune", "fastdecode",
-            "-threads", "4",
-            "-crf", "28",
-            "-c:a", "aac",
-            "-b:a", "128k",
+            "-c", "copy",
             "-movflags", "+faststart",
             str(sample_output),
         ]
 
-        logger.info(f"Running ffmpeg sample command: {' '.join(ffmpeg_cmd)}")
+        logger.info(f"Trying fast stream copy: {' '.join(fast_cmd)}")
         proc = await asyncio.create_subprocess_exec(
-            *ffmpeg_cmd,
-            stdout=asyncio.subprocess.PIPE,
+            *fast_cmd,
+            stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
+        _, fast_err = await asyncio.wait_for(proc.communicate(), timeout=45)
 
-        _, stderr_data = await asyncio.wait_for(proc.communicate(), timeout=180)
-
+        # If -c copy fails (e.g. keyframe alignment or container issue), fallback to ultrafast re-encode
         if not sample_output.exists() or sample_output.stat().st_size == 0:
-            err_msg = stderr_data.decode(errors="replace")[-300:]
-            logger.error(f"FFmpeg sample generation failed: {err_msg}")
-            await status_msg.edit_text(f"❌ **Failed to generate sample video.**\n`{err_msg}`")
-            return
+            logger.info("Fast copy failed, falling back to ultrafast re-encode")
+            reencode_cmd = [
+                "ffmpeg",
+                "-y",
+                "-ss", str(start_time),
+                "-i", stream_url,
+                "-t", str(actual_sample_dur),
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-tune", "fastdecode",
+                "-threads", "4",
+                "-crf", "28",
+                "-c:a", "aac",
+                "-b:a", "128k",
+                "-movflags", "+faststart",
+                str(sample_output),
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *reencode_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr_data = await asyncio.wait_for(proc.communicate(), timeout=120)
+
+            if not sample_output.exists() or sample_output.stat().st_size == 0:
+                err_msg = stderr_data.decode(errors="replace")[-300:]
+                logger.error(f"FFmpeg sample generation failed: {err_msg}")
+                await status_msg.edit_text(f"❌ **Failed to generate sample video.**\n`{err_msg}`")
+                return
 
         # Fast thumbnail extraction from the generated local sample
         thumb_cmd = [
@@ -630,21 +660,22 @@ async def process_screenshot_collage(client: Client, callback: CallbackQuery, se
         if duration <= 0:
             duration = 120.0
 
-        # Calculate evenly spaced intervals across duration
-        step = duration / (count + 1)
-        tasks = []
-        frame_items: List[Tuple[Path, str, float]] = []
+        # Calculate evenly spaced intervals across 2% to 98% of video duration
+        # (avoids blank intro/outro frames like black screens or studio logos)
+        start_bound = duration * 0.02
+        usable_span = duration * 0.96
+        timestamps = [start_bound + (i * usable_span / max(1, count - 1)) if count > 1 else duration * 0.5 for i in range(count)]
 
-        # Run frame extractions concurrently (up to 3 parallel requests)
-        sem = asyncio.Semaphore(3)
+        tasks = []
+        # Run frame extractions concurrently (up to 4 parallel workers)
+        sem = asyncio.Semaphore(4)
 
         async def worker(idx: int, target_sec: float, out_path: Path):
             async with sem:
                 success = await extract_single_frame(stream_url, target_sec, out_path)
                 return success, idx, out_path, target_sec
 
-        for i in range(count):
-            target_sec = step * (i + 1)
+        for i, target_sec in enumerate(timestamps):
             frame_file = work_dir / f"frame_{i:02d}.jpg"
             tasks.append(worker(i, target_sec, frame_file))
 
