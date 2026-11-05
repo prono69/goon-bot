@@ -250,7 +250,7 @@ async def video_receive_handler(client: Client, message: Message):
         ]
     ])
 
-    await message.reply_text(caption, reply_markup=buttons, quote=True)
+    await message.reply_text(caption, reply_markup=buttons)
 
 
 @Client.on_callback_query(filters.regex(r"^vtool:"))
