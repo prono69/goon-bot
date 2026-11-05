@@ -228,7 +228,7 @@ async def video_receive_handler(client: Client, message: Message):
         if now - VIDEO_SESSIONS[k]["created_at"] > 3600:
             VIDEO_SESSIONS.pop(k, None)
 
-    dur = video_info["duration"]
+    dur = int(video_info.get("duration") or 0)
     dur_text = f"{dur // 60}:{dur % 60:02d}" if dur > 0 else "Unknown"
     size_mb = video_info["file_size"] / (1024 * 1024)
 
@@ -303,7 +303,7 @@ async def video_tool_callback(client: Client, callback: CallbackQuery):
             return
 
         video_info = session["video_info"]
-        dur = video_info["duration"]
+        dur = int(video_info.get("duration") or 0)
         dur_text = f"{dur // 60}:{dur % 60:02d}" if dur > 0 else "Unknown"
         size_mb = video_info["file_size"] / (1024 * 1024)
 
