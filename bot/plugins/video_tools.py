@@ -242,45 +242,75 @@ def add_timestamp_badge(image: Image.Image, timestamp_text: str) -> Image.Image:
 
 def create_collage(image_data_list: List[Tuple[Path, str]], output_path: Path) -> Path:
     """
-    Create a high-quality collage/grid of screenshots with timestamps using PIL.
-    image_data_list: List of (image_path, timestamp_str)
+    Create a clean, dynamically balanced collage of screenshots with timestamps.
+    Automatically distributes images across rows so no empty voids exist, and centers trailing rows.
     """
     if not image_data_list:
         raise ValueError("No images to collage.")
 
     num_images = len(image_data_list)
 
-    # Determine grid layout (cols, rows)
-    if num_images == 1:
-        cols, rows = 1, 1
-    elif num_images == 2:
-        cols, rows = 2, 1
-    elif num_images <= 4:
-        cols, rows = 2, 2
-    elif num_images <= 6:
-        cols, rows = 3, 2
-    elif num_images <= 9:
-        cols, rows = 3, 3
-    else:  # 10
-        cols, rows = 5, 2
+    # Optimal row distribution mapping so rows are always balanced:
+    # 1 -> [1]
+    # 2 -> [2]
+    # 3 -> [3]
+    # 4 -> [2, 2]
+    # 5 -> [3, 2] (3 on top row, 2 centered below)
+    # 6 -> [3, 3]
+    # 7 -> [4, 3]
+    # 8 -> [4, 4]
+    # 9 -> [3, 3, 3]
+    # 10 -> [5, 5]
+    row_distribution_map = {
+        1: [1],
+        2: [2],
+        3: [3],
+        4: [2, 2],
+        5: [3, 2],
+        6: [3, 3],
+        7: [4, 3],
+        8: [4, 4],
+        9: [3, 3, 3],
+        10: [5, 5],
+    }
 
-    cell_w, cell_h = 480, 270  # 16:9 ratio thumbnail
-    margin = 12
+    row_counts = row_distribution_map.get(num_images)
+    if not row_counts:
+        cols = math.ceil(math.sqrt(num_images))
+        rows = math.ceil(num_images / cols)
+        row_counts = [cols] * (rows - 1) + [num_images - (cols * (rows - 1))]
 
-    total_w = cols * cell_w + (cols + 1) * margin
-    total_h = rows * cell_h + (rows + 1) * margin
+    # Choose canvas width based on maximum items in a row
+    max_cols = max(row_counts)
+    spacing = 10
+    
+    # 1920 base width for Full HD crisp resolution
+    base_canvas_width = 1920
+    cell_w = (base_canvas_width - (max_cols + 1) * spacing) // max_cols
+    cell_h = int(cell_w * 9 / 16)  # 16:9 aspect ratio
 
-    collage = Image.new("RGB", (total_w, total_h), color=(20, 24, 30))
+    total_rows = len(row_counts)
+    canvas_w = max_cols * cell_w + (max_cols + 1) * spacing
+    canvas_h = total_rows * cell_h + (total_rows + 1) * spacing
 
-    idx = 0
-    for r in range(rows):
-        for c in range(cols):
-            if idx >= num_images:
+    # Modern dark background
+    collage = Image.new("RGB", (canvas_w, canvas_h), color=(18, 20, 24))
+
+    img_idx = 0
+    y = spacing
+    for row_items in row_counts:
+        # Center row if it has fewer items than max_cols
+        row_total_w = row_items * cell_w + (row_items - 1) * spacing
+        start_x = (canvas_w - row_total_w) // 2
+
+        x = start_x
+        for _ in range(row_items):
+            if img_idx >= num_images:
                 break
-            img_path, ts_text = image_data_list[idx]
+            img_path, ts_text = image_data_list[img_idx]
             img = Image.open(img_path).convert("RGB")
 
-            # Resize keeping aspect ratio, crop to fill cell
+            # Resize and crop to 16:9 thumbnail cell
             img_ratio = img.width / img.height
             target_ratio = cell_w / cell_h
 
@@ -297,16 +327,17 @@ def create_collage(image_data_list: List[Tuple[Path, str]], output_path: Path) -
                 crop_y = (new_h - cell_h) // 2
                 cropped = resized.crop((0, crop_y, cell_w, crop_y + cell_h))
 
-            # Add timestamp badge at bottom-right of cell
+            # Draw timestamp badge
             cropped = add_timestamp_badge(cropped, ts_text)
 
-            x = margin + c * (cell_w + margin)
-            y = margin + r * (cell_h + margin)
             collage.paste(cropped, (x, y))
             img.close()
-            idx += 1
+            x += cell_w + spacing
+            img_idx += 1
 
-    collage.save(output_path, format="JPEG", quality=90, optimize=True)
+        y += cell_h + spacing
+
+    collage.save(output_path, format="JPEG", quality=92, optimize=True)
     return output_path
 
 
