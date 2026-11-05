@@ -6,8 +6,8 @@ import shutil
 import asyncio
 import logging
 from pathlib import Path
-from typing import Dict, Any, List, Optional
-from PIL import Image
+from typing import Dict, Any, List, Optional, Tuple
+from PIL import Image, ImageDraw, ImageFont
 from aiohttp import web
 
 from pyrogram import Client, filters
@@ -58,7 +58,6 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
     until_bytes = file_size - 1
 
     if range_header:
-        # Format: bytes=start-end or bytes=start-
         try:
             ranges = range_header.replace("bytes=", "").split("-")
             from_bytes = int(ranges[0])
@@ -87,9 +86,6 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
 
     # Stream requested byte range from Telegram MTProto
     try:
-        # In Pyrogram / Kurigram, offset is given in 1MB chunks (or chunk offset)
-        # stream_media(message, offset=..., limit=...)
-        # offset is the chunk index (1 chunk = 1MB = 1048576 bytes)
         chunk_size = 1024 * 1024
         start_chunk = from_bytes // chunk_size
         end_chunk = until_bytes // chunk_size
@@ -142,6 +138,17 @@ async def ensure_http_server():
 
 
 # ==================== HELPERS ====================
+
+def format_timestamp(seconds: float) -> str:
+    """Format seconds into HH:MM:SS or MM:SS."""
+    sec = max(0, int(seconds))
+    hrs = sec // 3600
+    mins = (sec % 3600) // 60
+    rem_sec = sec % 60
+    if hrs > 0:
+        return f"{hrs:02d}:{mins:02d}:{rem_sec:02d}"
+    return f"{mins:02d}:{rem_sec:02d}"
+
 
 def get_video_info_from_message(message: Message) -> Optional[Dict[str, Any]]:
     """Check if message has a video or a video-like document."""
@@ -202,13 +209,45 @@ async def probe_stream_duration(stream_url: str, fallback_duration: int = 0) -> 
     return 0.0
 
 
-def create_collage(image_paths: List[Path], output_path: Path, title: str = "") -> Path:
-    """Create a high-quality beautiful collage/grid of screenshots using PIL."""
-    if not image_paths:
+def add_timestamp_badge(image: Image.Image, timestamp_text: str) -> Image.Image:
+    """Draws a clean semi-transparent timestamp badge at the bottom-right of an image."""
+    draw = ImageDraw.Draw(image)
+    try:
+        # Try loading system font, fallback to default
+        font = ImageFont.load_default()
+    except Exception:
+        font = None
+
+    bbox = draw.textbbox((0, 0), timestamp_text, font=font)
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+
+    pad_x, pad_y = 6, 3
+    margin = 8
+    badge_w = text_w + pad_x * 2
+    badge_h = text_h + pad_y * 2
+
+    x2 = image.width - margin
+    y2 = image.height - margin
+    x1 = x2 - badge_w
+    y1 = y2 - badge_h
+
+    # Draw dark rounded rectangle background
+    draw.rounded_rectangle([x1, y1, x2, y2], radius=4, fill=(15, 15, 15, 210))
+    # Draw crisp white timestamp text
+    draw.text((x1 + pad_x, y1 + pad_y), timestamp_text, fill=(255, 255, 255), font=font)
+    return image
+
+
+def create_collage(image_data_list: List[Tuple[Path, str]], output_path: Path) -> Path:
+    """
+    Create a high-quality collage/grid of screenshots with timestamps using PIL.
+    image_data_list: List of (image_path, timestamp_str)
+    """
+    if not image_data_list:
         raise ValueError("No images to collage.")
 
-    images = [Image.open(p).convert("RGB") for p in image_paths]
-    num_images = len(images)
+    num_images = len(image_data_list)
 
     # Determine grid layout (cols, rows)
     if num_images == 1:
@@ -237,7 +276,10 @@ def create_collage(image_paths: List[Path], output_path: Path, title: str = "") 
         for c in range(cols):
             if idx >= num_images:
                 break
-            img = images[idx]
+            img_path, ts_text = image_data_list[idx]
+            img = Image.open(img_path).convert("RGB")
+
+            # Resize keeping aspect ratio, crop to fill cell
             img_ratio = img.width / img.height
             target_ratio = cell_w / cell_h
 
@@ -254,13 +296,14 @@ def create_collage(image_paths: List[Path], output_path: Path, title: str = "") 
                 crop_y = (new_h - cell_h) // 2
                 cropped = resized.crop((0, crop_y, cell_w, crop_y + cell_h))
 
+            # Add timestamp badge at bottom-right of cell
+            cropped = add_timestamp_badge(cropped, ts_text)
+
             x = margin + c * (cell_w + margin)
             y = margin + r * (cell_h + margin)
             collage.paste(cropped, (x, y))
+            img.close()
             idx += 1
-
-    for img in images:
-        img.close()
 
     collage.save(output_path, format="JPEG", quality=90, optimize=True)
     return output_path
@@ -290,7 +333,7 @@ async def video_receive_handler(client: Client, message: Message):
             VIDEO_SESSIONS.pop(k, None)
 
     dur = int(video_info.get("duration") or 0)
-    dur_text = f"{dur // 60}:{dur % 60:02d}" if dur > 0 else "Unknown"
+    dur_text = format_timestamp(dur) if dur > 0 else "Unknown"
     size_mb = video_info["file_size"] / (1024 * 1024)
 
     caption = (
@@ -334,7 +377,6 @@ async def video_tool_callback(client: Client, callback: CallbackQuery):
             await callback.answer("⚠️ Session expired or invalid. Please re-send the video.", show_alert=True)
             return
 
-        # Show selection for screenshot counts 2 to 10
         buttons = []
         row1 = [InlineKeyboardButton(str(i), callback_data=f"vtool:shots_run:{session_key}:{i}") for i in range(2, 6)]
         row2 = [InlineKeyboardButton(str(i), callback_data=f"vtool:shots_run:{session_key}:{i}") for i in range(6, 11)]
@@ -344,7 +386,7 @@ async def video_tool_callback(client: Client, callback: CallbackQuery):
 
         await callback.edit_message_text(
             "📸 **Select number of screenshots (Max: 10):**\n"
-            "The bot will extract evenly distributed frames and arrange them into a collage.",
+            "The bot will extract evenly distributed frames with timestamps and arrange them into a collage.",
             reply_markup=InlineKeyboardMarkup(buttons)
         )
         await callback.answer()
@@ -359,7 +401,7 @@ async def video_tool_callback(client: Client, callback: CallbackQuery):
 
         video_info = session["video_info"]
         dur = int(video_info.get("duration") or 0)
-        dur_text = f"{dur // 60}:{dur % 60:02d}" if dur > 0 else "Unknown"
+        dur_text = format_timestamp(dur) if dur > 0 else "Unknown"
         size_mb = video_info["file_size"] / (1024 * 1024)
 
         caption = (
@@ -450,16 +492,22 @@ async def process_sample_video(client: Client, callback: CallbackQuery, session:
         if duration > 45:
             start_time = min(30, int(duration / 3))
 
-        # FFmpeg reads directly from local HTTP URL with seeking support
+        end_time = min(start_time + 30, int(duration)) if duration > 0 else start_time + 30
+        actual_sample_dur = max(1, end_time - start_time)
+        timestamp_range = f"{format_timestamp(start_time)} - {format_timestamp(end_time)}"
+
+        # Optimized FFmpeg command: fast input seek + multithreading + ultrafast preset
         ffmpeg_cmd = [
             "ffmpeg",
             "-y",
             "-ss", str(start_time),
             "-i", stream_url,
-            "-t", "30",
+            "-t", str(actual_sample_dur),
             "-c:v", "libx264",
             "-preset", "ultrafast",
-            "-crf", "26",
+            "-tune", "fastdecode",
+            "-threads", "4",
+            "-crf", "28",
             "-c:a", "aac",
             "-b:a", "128k",
             "-movflags", "+faststart",
@@ -481,26 +529,30 @@ async def process_sample_video(client: Client, callback: CallbackQuery, session:
             await status_msg.edit_text(f"❌ **Failed to generate sample video.**\n`{err_msg}`")
             return
 
-        # Generate thumbnail for the sample
+        # Fast thumbnail extraction from the generated local sample
         thumb_cmd = [
             "ffmpeg",
             "-y",
-            "-i", str(sample_output),
             "-ss", "00:00:01",
+            "-i", str(sample_output),
             "-vframes", "1",
             str(sample_thumb)
         ]
         t_proc = await asyncio.create_subprocess_exec(*thumb_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
         await t_proc.wait()
 
-        # Upload generated sample
+        # Upload generated sample with requested timestamp range in caption
         await status_msg.edit_text("📤 **Uploading 30-second sample video...**")
+        caption = (
+            f"🎞 **30-second Sample Video ({timestamp_range})**\n"
+            f"📁 `{session['video_info']['file_name']}`"
+        )
         await client.send_video(
             chat_id=chat_id,
             video=str(sample_output),
-            caption=f"🎞 **30-second Sample Video**\n📁 `{session['video_info']['file_name']}`",
+            caption=caption,
             thumb=str(sample_thumb) if sample_thumb.exists() else None,
-            duration=30,
+            duration=actual_sample_dur,
             reply_to_message_id=msg_id,
         )
         await status_msg.delete()
@@ -519,8 +571,32 @@ async def process_sample_video(client: Client, callback: CallbackQuery, session:
             sample_thumb.unlink(missing_ok=True)
 
 
+async def extract_single_frame(stream_url: str, target_sec: float, out_file: Path) -> bool:
+    """Extracts a single frame fast using fast seek (-ss before -i)."""
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-ss", f"{target_sec:.2f}",
+        "-i", stream_url,
+        "-vframes", "1",
+        "-threads", "2",
+        "-q:v", "3",
+        str(out_file)
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(proc.wait(), timeout=35)
+        return out_file.exists() and out_file.stat().st_size > 0
+    except Exception:
+        return False
+
+
 async def process_screenshot_collage(client: Client, callback: CallbackQuery, session: Dict[str, Any], count: int):
-    """Streams video via local HTTP range server, captures screenshots, and creates a collage."""
+    """Streams video via local HTTP range server, captures screenshots concurrently, stamps timestamps, and collages."""
     user_id = callback.from_user.id
     count = max(2, min(count, 10))
     status_msg = await callback.edit_message_text(f"⚡ **Preparing stream to capture {count} screenshots...**")
@@ -539,7 +615,6 @@ async def process_screenshot_collage(client: Client, callback: CallbackQuery, se
             await status_msg.edit_text("❌ Could not find original message.")
             return
 
-        # Register streaming job
         STREAM_JOBS[job_token] = {
             "client": client,
             "message": target_message,
@@ -548,49 +623,49 @@ async def process_screenshot_collage(client: Client, callback: CallbackQuery, se
         }
 
         stream_url = f"http://127.0.0.1:{HTTP_SERVER_PORT}/stream/{job_token}"
-        await status_msg.edit_text(f"⚡ **Streaming video to capture {count} screenshots...**")
+        await status_msg.edit_text(f"⚡ **Streaming video to capture {count} screenshots in parallel...**")
 
         # Determine duration
         duration = await probe_stream_duration(stream_url, session["video_info"].get("duration", 0))
         if duration <= 0:
             duration = 120.0
 
-        # Extract frames evenly spaced across duration
+        # Calculate evenly spaced intervals across duration
         step = duration / (count + 1)
-        frames: List[Path] = []
+        tasks = []
+        frame_items: List[Tuple[Path, str, float]] = []
 
-        # Seek and extract each frame individually using HTTP range seeking
+        # Run frame extractions concurrently (up to 3 parallel requests)
+        sem = asyncio.Semaphore(3)
+
+        async def worker(idx: int, target_sec: float, out_path: Path):
+            async with sem:
+                success = await extract_single_frame(stream_url, target_sec, out_path)
+                return success, idx, out_path, target_sec
+
         for i in range(count):
             target_sec = step * (i + 1)
             frame_file = work_dir / f"frame_{i:02d}.jpg"
-            cmd = [
-                "ffmpeg",
-                "-y",
-                "-ss", f"{target_sec:.2f}",
-                "-i", stream_url,
-                "-vframes", "1",
-                "-q:v", "3",
-                str(frame_file)
-            ]
-            f_proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.PIPE
-            )
-            await asyncio.wait_for(f_proc.wait(), timeout=30)
-            if frame_file.exists() and frame_file.stat().st_size > 0:
-                frames.append(frame_file)
+            tasks.append(worker(i, target_sec, frame_file))
 
-        if not frames:
+        results = await asyncio.gather(*tasks)
+
+        # Collect successful frames in order
+        valid_frames: List[Tuple[Path, str]] = []
+        for success, idx, out_path, target_sec in sorted(results, key=lambda x: x[1]):
+            if success and out_path.exists() and out_path.stat().st_size > 0:
+                valid_frames.append((out_path, format_timestamp(target_sec)))
+
+        if not valid_frames:
             await status_msg.edit_text("❌ **Failed to extract frames from video stream.**")
             return
 
-        await status_msg.edit_text("🎨 **Creating collage...**")
-        collage_file = create_collage(frames, collage_path, title=session["video_info"]["file_name"])
+        await status_msg.edit_text("🎨 **Creating collage with timestamps...**")
+        collage_file = create_collage(valid_frames, collage_path)
 
         await status_msg.edit_text("📤 **Uploading collage...**")
         caption = (
-            f"📸 **Screenshots Collage ({len(frames)} frames)**\n"
+            f"📸 **Screenshots Collage ({len(valid_frames)} frames)**\n"
             f"📁 `{session['video_info']['file_name']}`"
         )
         await client.send_photo(
