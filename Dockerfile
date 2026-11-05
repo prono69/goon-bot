@@ -24,9 +24,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     TZ=Asia/Kolkata
 
-# Git is required by the /restart command
+# Git is required by the /restart command; ffmpeg is required for video tools and streaming
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Required because /restart runs git pull inside /app
