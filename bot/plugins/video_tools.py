@@ -17,6 +17,9 @@ from pyrogram.types import (
     CallbackQuery,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
+    InputRichMessage,
+    InputRichMessageMedia,
+    InputMediaPhoto,
 )
 from pyrogram.errors import FloodWait, MessageNotModified
 
@@ -214,7 +217,6 @@ def add_timestamp_badge(image: Image.Image, timestamp_text: str) -> Image.Image:
     """Draws a clean semi-transparent timestamp badge at the bottom-right of an image."""
     draw = ImageDraw.Draw(image)
     try:
-        # Try loading system font, fallback to default
         font = ImageFont.load_default()
     except Exception:
         font = None
@@ -250,17 +252,6 @@ def create_collage(image_data_list: List[Tuple[Path, str]], output_path: Path) -
 
     num_images = len(image_data_list)
 
-    # Optimal row distribution mapping so rows are always balanced:
-    # 1 -> [1]
-    # 2 -> [2]
-    # 3 -> [3]
-    # 4 -> [2, 2]
-    # 5 -> [3, 2] (3 on top row, 2 centered below)
-    # 6 -> [3, 3]
-    # 7 -> [4, 3]
-    # 8 -> [4, 4]
-    # 9 -> [3, 3, 3]
-    # 10 -> [5, 5]
     row_distribution_map = {
         1: [1],
         2: [2],
@@ -280,11 +271,9 @@ def create_collage(image_data_list: List[Tuple[Path, str]], output_path: Path) -
         rows = math.ceil(num_images / cols)
         row_counts = [cols] * (rows - 1) + [num_images - (cols * (rows - 1))]
 
-    # Choose canvas width based on maximum items in a row
     max_cols = max(row_counts)
     spacing = 10
     
-    # 1920 base width for Full HD crisp resolution
     base_canvas_width = 1920
     cell_w = (base_canvas_width - (max_cols + 1) * spacing) // max_cols
     cell_h = int(cell_w * 9 / 16)  # 16:9 aspect ratio
@@ -293,13 +282,11 @@ def create_collage(image_data_list: List[Tuple[Path, str]], output_path: Path) -
     canvas_w = max_cols * cell_w + (max_cols + 1) * spacing
     canvas_h = total_rows * cell_h + (total_rows + 1) * spacing
 
-    # Modern dark background
     collage = Image.new("RGB", (canvas_w, canvas_h), color=(18, 20, 24))
 
     img_idx = 0
     y = spacing
     for row_items in row_counts:
-        # Center row if it has fewer items than max_cols
         row_total_w = row_items * cell_w + (row_items - 1) * spacing
         start_x = (canvas_w - row_total_w) // 2
 
@@ -310,7 +297,6 @@ def create_collage(image_data_list: List[Tuple[Path, str]], output_path: Path) -
             img_path, ts_text = image_data_list[img_idx]
             img = Image.open(img_path).convert("RGB")
 
-            # Resize and crop to 16:9 thumbnail cell
             img_ratio = img.width / img.height
             target_ratio = cell_w / cell_h
 
@@ -327,7 +313,6 @@ def create_collage(image_data_list: List[Tuple[Path, str]], output_path: Path) -
                 crop_y = (new_h - cell_h) // 2
                 cropped = resized.crop((0, crop_y, cell_w, crop_y + cell_h))
 
-            # Draw timestamp badge
             cropped = add_timestamp_badge(cropped, ts_text)
 
             collage.paste(cropped, (x, y))
@@ -358,7 +343,6 @@ async def video_receive_handler(client: Client, message: Message):
         "created_at": time.time(),
     }
 
-    # Clean up old sessions (> 1 hour)
     now = time.time()
     for k in list(VIDEO_SESSIONS.keys()):
         if now - VIDEO_SESSIONS[k]["created_at"] > 3600:
@@ -418,7 +402,7 @@ async def video_tool_callback(client: Client, callback: CallbackQuery):
 
         await callback.edit_message_text(
             "📸 **Select number of screenshots (Max: 10):**\n"
-            "The bot will extract evenly distributed frames with timestamps and arrange them into a collage.",
+            "The bot will extract frames and create a collage followed by an interactive slideshow.",
             reply_markup=InlineKeyboardMarkup(buttons)
         )
         await callback.answer()
@@ -483,7 +467,7 @@ async def video_tool_callback(client: Client, callback: CallbackQuery):
             return
 
         ACTIVE_USERS.add(user_id)
-        await callback.answer(f"Generating {count} screenshots collage...")
+        await callback.answer(f"Generating {count} screenshots...")
         asyncio.create_task(process_screenshot_collage(client, callback, session, count))
 
 
@@ -507,7 +491,6 @@ async def process_sample_video(client: Client, callback: CallbackQuery, session:
             await status_msg.edit_text("❌ Could not find original message.")
             return
 
-        # Register streaming job
         STREAM_JOBS[job_token] = {
             "client": client,
             "message": target_message,
@@ -518,13 +501,10 @@ async def process_sample_video(client: Client, callback: CallbackQuery, session:
         stream_url = f"http://127.0.0.1:{HTTP_SERVER_PORT}/stream/{job_token}"
         await status_msg.edit_text("⚡ **Streaming video to generate 30s sample...**")
 
-        # Determine duration
         duration = await probe_stream_duration(stream_url, session["video_info"].get("duration", 0))
         sample_duration = 30
 
-        # Calculate a realistic, randomized start time across the video
         if duration > sample_duration + 10:
-            # Pick a random point between 5% of video and (95% - sample_duration)
             min_start = max(5.0, duration * 0.05)
             max_start = max(min_start, (duration * 0.95) - sample_duration)
             start_time = int(random.uniform(min_start, max_start))
@@ -537,8 +517,6 @@ async def process_sample_video(client: Client, callback: CallbackQuery, session:
         actual_sample_dur = max(1, end_time - start_time)
         timestamp_range = f"{format_timestamp(start_time)} - {format_timestamp(end_time)}"
 
-        # Try ultra-fast stream copy (-c copy) first without re-encoding!
-        # This is instantaneous and takes only ~1-2 seconds.
         fast_cmd = [
             "ffmpeg",
             "-y",
@@ -558,7 +536,6 @@ async def process_sample_video(client: Client, callback: CallbackQuery, session:
         )
         _, fast_err = await asyncio.wait_for(proc.communicate(), timeout=45)
 
-        # If -c copy fails (e.g. keyframe alignment or container issue), fallback to ultrafast re-encode
         if not sample_output.exists() or sample_output.stat().st_size == 0:
             logger.info("Fast copy failed, falling back to ultrafast re-encode")
             reencode_cmd = [
@@ -579,7 +556,7 @@ async def process_sample_video(client: Client, callback: CallbackQuery, session:
             ]
             proc = await asyncio.create_subprocess_exec(
                 *reencode_cmd,
-                stdout=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
             )
             _, stderr_data = await asyncio.wait_for(proc.communicate(), timeout=120)
@@ -590,7 +567,6 @@ async def process_sample_video(client: Client, callback: CallbackQuery, session:
                 await status_msg.edit_text(f"❌ **Failed to generate sample video.**\n`{err_msg}`")
                 return
 
-        # Fast thumbnail extraction from the generated local sample
         thumb_cmd = [
             "ffmpeg",
             "-y",
@@ -602,7 +578,6 @@ async def process_sample_video(client: Client, callback: CallbackQuery, session:
         t_proc = await asyncio.create_subprocess_exec(*thumb_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
         await t_proc.wait()
 
-        # Upload generated sample with requested timestamp range in caption
         await status_msg.edit_text("📤 **Uploading 30-second sample video...**")
         caption = (
             f"🎞 **30-second Sample Video ({timestamp_range})**\n"
@@ -648,7 +623,7 @@ async def extract_single_frame(stream_url: str, target_sec: float, out_file: Pat
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
         )
         await asyncio.wait_for(proc.wait(), timeout=35)
         return out_file.exists() and out_file.stat().st_size > 0
@@ -657,12 +632,13 @@ async def extract_single_frame(stream_url: str, target_sec: float, out_file: Pat
 
 
 async def process_screenshot_collage(client: Client, callback: CallbackQuery, session: Dict[str, Any], count: int):
-    """Streams video via local HTTP range server, captures screenshots concurrently, stamps timestamps, and collages."""
+    """Streams video, captures frames, collages them, sends the collage, and sends the rich slideshow."""
     user_id = callback.from_user.id
     count = max(2, min(count, 10))
     status_msg = await callback.edit_message_text(f"⚡ **Preparing stream to capture {count} screenshots...**")
     chat_id = session["chat_id"]
     msg_id = session["message_id"]
+    file_name = session["video_info"]["file_name"]
 
     work_dir = TEMP_DIR / f"shots_{user_id}_{int(time.time())}"
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -686,19 +662,15 @@ async def process_screenshot_collage(client: Client, callback: CallbackQuery, se
         stream_url = f"http://127.0.0.1:{HTTP_SERVER_PORT}/stream/{job_token}"
         await status_msg.edit_text(f"⚡ **Streaming video to capture {count} screenshots in parallel...**")
 
-        # Determine duration
         duration = await probe_stream_duration(stream_url, session["video_info"].get("duration", 0))
         if duration <= 0:
             duration = 120.0
 
-        # Calculate evenly spaced intervals across 2% to 98% of video duration
-        # (avoids blank intro/outro frames like black screens or studio logos)
         start_bound = duration * 0.02
         usable_span = duration * 0.96
         timestamps = [start_bound + (i * usable_span / max(1, count - 1)) if count > 1 else duration * 0.5 for i in range(count)]
 
         tasks = []
-        # Run frame extractions concurrently (up to 4 parallel workers)
         sem = asyncio.Semaphore(4)
 
         async def worker(idx: int, target_sec: float, out_path: Path):
@@ -722,13 +694,14 @@ async def process_screenshot_collage(client: Client, callback: CallbackQuery, se
             await status_msg.edit_text("❌ **Failed to extract frames from video stream.**")
             return
 
+        # 1. Generate and Send Collage
         await status_msg.edit_text("🎨 **Creating collage with timestamps...**")
         collage_file = create_collage(valid_frames, collage_path)
 
         await status_msg.edit_text("📤 **Uploading collage...**")
         caption = (
             f"📸 **Screenshots Collage ({len(valid_frames)} frames)**\n"
-            f"📁 `{session['video_info']['file_name']}`"
+            f"📁 `{file_name}`"
         )
         await client.send_photo(
             chat_id=chat_id,
@@ -736,12 +709,45 @@ async def process_screenshot_collage(client: Client, callback: CallbackQuery, se
             caption=caption,
             reply_to_message_id=msg_id,
         )
+
+        # 2. Build and Send Rich Message Slideshow
+        await status_msg.edit_text("🎞 **Creating rich slideshow message...**")
+
+        # Map each extracted frame into an InputRichMessageMedia item
+        media_list = [
+            InputRichMessageMedia(
+                id=i,
+                media=InputMediaPhoto(media=str(frame_path))
+            )
+            for i, (frame_path, _) in enumerate(valid_frames)
+        ]
+
+        # Generate <img> tags for the available frames
+        img_tags = "\n".join([f'<img src="tg://photo?id={i}"/>' for i in range(len(valid_frames))])
+
+        rich_html = (
+            f"<details open><summary><b>SCREENSHOTS</b></summary>\n"
+            f"<tg-slideshow>\n"
+            f"{img_tags}\n"
+            f"<figcaption><b>Screenshots</b><br><br>{file_name}</figcaption>\n"
+            f"</tg-slideshow>\n"
+            f"</details>"
+        )
+
+        await client.send_rich_message(
+            chat_id=chat_id,
+            rich_message=InputRichMessage(
+                html=rich_html,
+                media=media_list
+            )
+        )
+
         await status_msg.delete()
 
     except asyncio.TimeoutError:
         await status_msg.edit_text("❌ **Timeout:** Screenshot capture took too long.")
     except Exception as e:
-        logger.exception("Error during screenshot collage processing:")
+        logger.exception("Error during screenshot processing:")
         await status_msg.edit_text(f"❌ **Error generating screenshots:** `{e}`")
     finally:
         ACTIVE_USERS.discard(user_id)
