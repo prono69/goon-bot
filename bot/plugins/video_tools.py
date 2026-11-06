@@ -214,7 +214,7 @@ async def probe_stream_duration(stream_url: str, fallback_duration: int = 0) -> 
 
 
 def add_timestamp_badge(image: Image.Image, timestamp_text: str) -> Image.Image:
-    """Draws a clean semi-transparent timestamp badge at the bottom-right of an image."""
+    """Draws a clean semi-transparent timestamp badge scaled proportionally to image size."""
     draw = ImageDraw.Draw(image)
     try:
         font = ImageFont.load_default()
@@ -225,8 +225,12 @@ def add_timestamp_badge(image: Image.Image, timestamp_text: str) -> Image.Image:
     text_w = bbox[2] - bbox[0]
     text_h = bbox[3] - bbox[1]
 
-    pad_x, pad_y = 8, 4
-    margin = 12
+    # Proportional padding based on image width
+    scale = max(1.0, image.width / 1280.0)
+    pad_x = int(8 * scale)
+    pad_y = int(4 * scale)
+    margin = int(12 * scale)
+
     badge_w = text_w + pad_x * 2
     badge_h = text_h + pad_y * 2
 
@@ -235,17 +239,18 @@ def add_timestamp_badge(image: Image.Image, timestamp_text: str) -> Image.Image:
     x1 = x2 - badge_w
     y1 = y2 - badge_h
 
-    # Draw dark rounded rectangle background
-    draw.rounded_rectangle([x1, y1, x2, y2], radius=4, fill=(15, 15, 15, 210))
-    # Draw crisp white timestamp text
+    # Dark rounded background box
+    draw.rounded_rectangle([x1, y1, x2, y2], radius=max(3, int(4 * scale)), fill=(15, 15, 15, 215))
+    # Text inside
     draw.text((x1 + pad_x, y1 + pad_y), timestamp_text, fill=(255, 255, 255), font=font)
     return image
+
 
 
 def create_collage(image_data_list: List[Tuple[Path, str]], output_path: Path) -> Path:
     """
     Create a clean, dynamically balanced collage of screenshots.
-    Images already have timestamps badged on them.
+    Re-applies the badge after cropping to guarantee it stays in-frame.
     """
     if not image_data_list:
         raise ValueError("No images to collage.")
@@ -294,7 +299,7 @@ def create_collage(image_data_list: List[Tuple[Path, str]], output_path: Path) -
         for _ in range(row_items):
             if img_idx >= num_images:
                 break
-            img_path, _ = image_data_list[img_idx]
+            img_path, ts_text = image_data_list[img_idx]
             img = Image.open(img_path).convert("RGB")
 
             img_ratio = img.width / img.height
@@ -313,6 +318,9 @@ def create_collage(image_data_list: List[Tuple[Path, str]], output_path: Path) -
                 crop_y = (new_h - cell_h) // 2
                 cropped = resized.crop((0, crop_y, cell_w, crop_y + cell_h))
 
+            # Apply timestamp badge directly to the cropped cell so it is never cut off
+            cropped = add_timestamp_badge(cropped, ts_text)
+
             collage.paste(cropped, (x, y))
             img.close()
             x += cell_w + spacing
@@ -322,6 +330,7 @@ def create_collage(image_data_list: List[Tuple[Path, str]], output_path: Path) -
 
     collage.save(output_path, format="JPEG", quality=92, optimize=True)
     return output_path
+
 
 
 # ==================== HANDLERS ====================
