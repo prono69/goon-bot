@@ -225,8 +225,8 @@ def add_timestamp_badge(image: Image.Image, timestamp_text: str) -> Image.Image:
     text_w = bbox[2] - bbox[0]
     text_h = bbox[3] - bbox[1]
 
-    pad_x, pad_y = 6, 3
-    margin = 8
+    pad_x, pad_y = 8, 4
+    margin = 12
     badge_w = text_w + pad_x * 2
     badge_h = text_h + pad_y * 2
 
@@ -244,8 +244,8 @@ def add_timestamp_badge(image: Image.Image, timestamp_text: str) -> Image.Image:
 
 def create_collage(image_data_list: List[Tuple[Path, str]], output_path: Path) -> Path:
     """
-    Create a clean, dynamically balanced collage of screenshots with timestamps.
-    Automatically distributes images across rows so no empty voids exist, and centers trailing rows.
+    Create a clean, dynamically balanced collage of screenshots.
+    Images already have timestamps badged on them.
     """
     if not image_data_list:
         raise ValueError("No images to collage.")
@@ -294,7 +294,7 @@ def create_collage(image_data_list: List[Tuple[Path, str]], output_path: Path) -
         for _ in range(row_items):
             if img_idx >= num_images:
                 break
-            img_path, ts_text = image_data_list[img_idx]
+            img_path, _ = image_data_list[img_idx]
             img = Image.open(img_path).convert("RGB")
 
             img_ratio = img.width / img.height
@@ -312,8 +312,6 @@ def create_collage(image_data_list: List[Tuple[Path, str]], output_path: Path) -
                 resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
                 crop_y = (new_h - cell_h) // 2
                 cropped = resized.crop((0, crop_y, cell_w, crop_y + cell_h))
-
-            cropped = add_timestamp_badge(cropped, ts_text)
 
             collage.paste(cropped, (x, y))
             img.close()
@@ -343,6 +341,7 @@ async def video_receive_handler(client: Client, message: Message):
         "created_at": time.time(),
     }
 
+    # Clean up old sessions (> 1 hour)
     now = time.time()
     for k in list(VIDEO_SESSIONS.keys()):
         if now - VIDEO_SESSIONS[k]["created_at"] > 3600:
@@ -556,7 +555,7 @@ async def process_sample_video(client: Client, callback: CallbackQuery, session:
             ]
             proc = await asyncio.create_subprocess_exec(
                 *reencode_cmd,
-                stdout=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
             _, stderr_data = await asyncio.wait_for(proc.communicate(), timeout=120)
@@ -623,7 +622,7 @@ async def extract_single_frame(stream_url: str, target_sec: float, out_file: Pat
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
         )
         await asyncio.wait_for(proc.wait(), timeout=35)
         return out_file.exists() and out_file.stat().st_size > 0
@@ -632,7 +631,7 @@ async def extract_single_frame(stream_url: str, target_sec: float, out_file: Pat
 
 
 async def process_screenshot_collage(client: Client, callback: CallbackQuery, session: Dict[str, Any], count: int):
-    """Streams video, captures frames, collages them, sends the collage, and sends the rich slideshow."""
+    """Streams video, captures frames, stamps timestamps, builds collage, and sends rich slideshow."""
     user_id = callback.from_user.id
     count = max(2, min(count, 10))
     status_msg = await callback.edit_message_text(f"⚡ **Preparing stream to capture {count} screenshots...**")
@@ -684,11 +683,18 @@ async def process_screenshot_collage(client: Client, callback: CallbackQuery, se
 
         results = await asyncio.gather(*tasks)
 
-        # Collect successful frames in order
+        # Collect, badge with timestamp, and save directly to disk
         valid_frames: List[Tuple[Path, str]] = []
         for success, idx, out_path, target_sec in sorted(results, key=lambda x: x[1]):
             if success and out_path.exists() and out_path.stat().st_size > 0:
-                valid_frames.append((out_path, format_timestamp(target_sec)))
+                ts_str = format_timestamp(target_sec)
+                
+                # Stamp the timestamp badge onto the original frame
+                with Image.open(out_path) as im:
+                    stamped_im = add_timestamp_badge(im.convert("RGB"), ts_str)
+                    stamped_im.save(out_path, format="JPEG", quality=95)
+
+                valid_frames.append((out_path, ts_str))
 
         if not valid_frames:
             await status_msg.edit_text("❌ **Failed to extract frames from video stream.**")
@@ -710,23 +716,21 @@ async def process_screenshot_collage(client: Client, callback: CallbackQuery, se
             reply_to_message_id=msg_id,
         )
 
-        # 2. Build and Send Rich Message Slideshow
+        # 2. Build and Send Rich Message Slideshow (with string IDs and badged frames)
         await status_msg.edit_text("🎞 **Creating rich slideshow message...**")
 
-        # Map each extracted frame into an InputRichMessageMedia item
         media_list = [
             InputRichMessageMedia(
-                id=i,
+                id=str(i),
                 media=InputMediaPhoto(media=str(frame_path))
             )
             for i, (frame_path, _) in enumerate(valid_frames)
         ]
 
-        # Generate <img> tags for the available frames
         img_tags = "\n".join([f'<img src="tg://photo?id={i}"/>' for i in range(len(valid_frames))])
 
         rich_html = (
-            f"<details open><summary><b>SCREENSHOTS</b></summary>\n"
+            f"<details open><summary><b>SHOTS</b></summary>\n"
             f"<tg-slideshow>\n"
             f"{img_tags}\n"
             f"<figcaption><b>Screenshots</b><br><br>{file_name}</figcaption>\n"
