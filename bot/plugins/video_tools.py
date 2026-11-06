@@ -14,6 +14,7 @@ from PIL import Image, ImageDraw, ImageFont
 from aiohttp import web
 
 from pyrogram import Client, filters
+from pyrogram.enums import ButtonStyle
 from pyrogram.types import (
     Message,
     CallbackQuery,
@@ -511,19 +512,53 @@ def build_main_menu(session_key: str, video_info: Dict[str, Any]) -> Tuple[str, 
         f"📁 **Name:** `{video_info['file_name']}`\n"
         f"📦 **Size:** `{size_mb:.1f} MB`\n"
         f"⏱ **Duration:** `{dur_text}`\n\n"
-        f"Select what you'd like to do:"
+        f"Select the number of screenshots or generate a sample:"
     )
 
     buttons = InlineKeyboardMarkup([
+        # 2 3
         [
-            InlineKeyboardButton("🎞 Generate 30s Sample", callback_data=f"vtool:sample:{session_key}"),
-            InlineKeyboardButton("📸 Generate Screenshots", callback_data=f"vtool:shots:{session_key}"),
+            InlineKeyboardButton("2", callback_data=f"vtool:shots_run:{session_key}:2", style=ButtonStyle.PRIMARY),
+            InlineKeyboardButton("3", callback_data=f"vtool:shots_run:{session_key}:3", style=ButtonStyle.PRIMARY),
         ],
+        # 4 5
         [
-            InlineKeyboardButton("❌ Close", callback_data=f"vtool:close:{session_key}")
-        ]
+            InlineKeyboardButton("4", callback_data=f"vtool:shots_run:{session_key}:4", style=ButtonStyle.PRIMARY),
+            InlineKeyboardButton("5", callback_data=f"vtool:shots_run:{session_key}:5", style=ButtonStyle.PRIMARY),
+        ],
+        # 6 7
+        [
+            InlineKeyboardButton("6", callback_data=f"vtool:shots_run:{session_key}:6", style=ButtonStyle.PRIMARY),
+            InlineKeyboardButton("7", callback_data=f"vtool:shots_run:{session_key}:7", style=ButtonStyle.PRIMARY),
+        ],
+        # 8 9
+        [
+            InlineKeyboardButton("8", callback_data=f"vtool:shots_run:{session_key}:8", style=ButtonStyle.PRIMARY),
+            InlineKeyboardButton("9", callback_data=f"vtool:shots_run:{session_key}:9", style=ButtonStyle.PRIMARY),
+        ],
+        # 10
+        [
+            InlineKeyboardButton("10", callback_data=f"vtool:shots_run:{session_key}:10", style=ButtonStyle.PRIMARY),
+        ],
+        # Get sample video (30s)
+        [
+            InlineKeyboardButton(
+                "🎞 Get sample video (30s)",
+                callback_data=f"vtool:sample:{session_key}",
+                style=ButtonStyle.SUCCESS,
+            ),
+        ],
+        # Close
+        [
+            InlineKeyboardButton(
+                "❌ Close",
+                callback_data=f"vtool:close:{session_key}",
+                style=ButtonStyle.DANGER,
+            ),
+        ],
     ])
     return caption, buttons
+
 
 
 # Private chats only, never our own or other bots' messages, and only real video files.
@@ -555,7 +590,7 @@ async def video_receive_handler(client: Client, message: Message):
 
 @Client.on_callback_query(filters.regex(r"^vtool:"))
 async def video_tool_callback(client: Client, callback: CallbackQuery):
-    """Handles button interactions for sample generation and screenshot collage."""
+    """Handles button interactions directly for sample generation and screenshot counts."""
     parts = (callback.data or "").split(":")
     if len(parts) < 3:
         await safe_answer(callback, "⚠️ Invalid request.", show_alert=True)
@@ -566,39 +601,8 @@ async def video_tool_callback(client: Client, callback: CallbackQuery):
 
     if action == "close":
         VIDEO_SESSIONS.pop(session_key, None)
-        await safe_answer(callback, "Closed.")  # answer first so the spinner always stops
+        await safe_answer(callback, "Closed.")
         await safe_delete(callback.message)
-        return
-
-    if action == "shots":
-        session = VIDEO_SESSIONS.get(session_key)
-        if not session:
-            await safe_answer(callback, "⚠️ Session expired or invalid. Please re-send the video.", show_alert=True)
-            return
-
-        row1 = [InlineKeyboardButton(str(i), callback_data=f"vtool:shots_run:{session_key}:{i}") for i in range(2, 6)]
-        row2 = [InlineKeyboardButton(str(i), callback_data=f"vtool:shots_run:{session_key}:{i}") for i in range(6, 11)]
-        buttons = [row1, row2, [InlineKeyboardButton("🔙 Back", callback_data=f"vtool:back:{session_key}")]]
-
-        with contextlib.suppress(MessageNotModified):
-            await callback.edit_message_text(
-                "📸 **Select number of screenshots (Max: 10):**\n"
-                "The bot will extract frames and create a collage followed by an interactive slideshow.",
-                reply_markup=InlineKeyboardMarkup(buttons)
-            )
-        await safe_answer(callback)
-        return
-
-    if action == "back":
-        session = VIDEO_SESSIONS.get(session_key)
-        if not session:
-            await safe_answer(callback, "⚠️ Session expired.", show_alert=True)
-            return
-
-        caption, buttons = build_main_menu(session_key, session["video_info"])
-        with contextlib.suppress(MessageNotModified):
-            await callback.edit_message_text(caption, reply_markup=buttons)
-        await safe_answer(callback)
         return
 
     if action not in ("sample", "shots_run"):
@@ -616,20 +620,21 @@ async def video_tool_callback(client: Client, callback: CallbackQuery):
         return
 
     if action == "sample":
-        ACTIVE_USERS.add(user_id)  # released in the task's finally block
+        ACTIVE_USERS.add(user_id)
         await safe_answer(callback, "Starting sample video generation...")
         spawn(process_sample_video(client, callback, session))
 
-    else:  # shots_run
+    elif action == "shots_run":
         try:
             count = int(parts[3])
         except (IndexError, ValueError):
             await safe_answer(callback, "⚠️ Invalid request.", show_alert=True)
             return
 
-        ACTIVE_USERS.add(user_id)  # released in the task's finally block
+        ACTIVE_USERS.add(user_id)
         await safe_answer(callback, f"Generating {count} screenshots...")
         spawn(process_screenshot_collage(client, callback, session, count))
+
 
 
 # ==================== STREAM PROCESSING TASKS ====================
