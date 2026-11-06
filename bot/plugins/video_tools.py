@@ -291,13 +291,24 @@ def get_video_info_from_message(message: Message) -> Optional[Dict[str, Any]]:
             }
     return None
 
+async def _video_or_reply_filter(_, __, message: Message) -> bool:
+    if message.from_user and (message.from_user.is_self or message.from_user.is_bot):
+        return False
 
-async def _is_video_message(_, __, message: Message) -> bool:
-    return get_video_info_from_message(message) is not None
+    # 1. Private chat: Automatic trigger on video upload
+    if message.chat.type.name == "PRIVATE":
+        return get_video_info_from_message(message) is not None
 
+    # 2. Group/Supergroup/Channel: Trigger only on /ss command in reply to a video
+    text = (message.text or message.caption or "").strip()
+    if text.startswith(("/", "!", ".")):
+        cmd = text[1:].split()[0].split("@")[0].lower()
+        if cmd in ("ss", "shots") and message.reply_to_message:
+            return get_video_info_from_message(message.reply_to_message) is not None
 
-# Only fires for real video / video-document messages
-video_filter = filters.create(_is_video_message, "VideoMessageFilter")
+    return False
+
+unified_video_filter = filters.create(_video_or_reply_filter, "UnifiedVideoFilter")
 
 
 async def probe_duration(target: str) -> float:
@@ -563,17 +574,18 @@ def build_main_menu(session_key: str, video_info: Dict[str, Any]) -> Tuple[str, 
 
 # Private chats only, never our own or other bots' messages, and only real video files.
 # To also allow groups, replace filters.private with filters.private | filters.group.
-@Client.on_message(filters.private & ~filters.me & ~filters.bot & video_filter)
-async def video_receive_handler(client: Client, message: Message):
-    """Detects video or video documents and prompts user with action buttons."""
-    video_info = get_video_info_from_message(message)
+@Client.on_message(unified_video_filter)
+async def unified_video_handler(client: Client, message: Message):
+    """Handles both auto-detection in private chats and /ss command replies in groups."""
+    target_msg = message.reply_to_message if message.reply_to_message else message
+    video_info = get_video_info_from_message(target_msg)
     if not video_info:
         return
 
-    session_key = f"{message.chat.id}_{message.id}"
+    session_key = f"{target_msg.chat.id}_{target_msg.id}"
     VIDEO_SESSIONS[session_key] = {
-        "chat_id": message.chat.id,
-        "message_id": message.id,
+        "chat_id": target_msg.chat.id,
+        "message_id": target_msg.id,
         "video_info": video_info,
         "created_at": time.time(),
     }
@@ -902,7 +914,7 @@ async def process_screenshot_collage(client: Client, callback: CallbackQuery, se
         img_tags = "\n".join([f'<img src="tg://photo?id={i}"/>' for i in range(len(slide_paths))])
 
         rich_html = (
-            f"<details><summary><b>SCREENSHOTS</b></summary>\n"
+            f"<details><summary><b>🖼️ SCREENSHOTS</b></summary>\n"
             f"<tg-slideshow>\n"
             f"{img_tags}\n"
             f"<figcaption><b>Screenshots</b><br>{file_name}</figcaption>\n"
